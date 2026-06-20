@@ -231,3 +231,88 @@ def test_region_parsing():
     assert parse_region("7:55050000") == ("chr7", 55050000, 55050000)
     with pytest.raises(ValueError):
         parse_region("not-a-region")
+
+
+def test_classify_clinvar_delta():
+    """ClinVar reanalysis diff: newly-pathogenic (tiered by review status), reclassified,
+    de-pathogenized, and withdrawn. Pure function — no I/O."""
+    from locus.refresh import classify_clinvar_delta
+
+    def v(clnsig, rev="criteria_provided,_multiple_submitters,_no_conflicts", gene="G"):
+        return {"clnsig": clnsig, "clnrevstat": rev, "gene": gene, "rsid": "rs1", "clndn": "Some_disease"}
+
+    prev = {
+        ("chr1", 100, "A", "G"): v("Benign"),                  # -> becomes pathogenic
+        ("chr1", 200, "C", "T"): v("Pathogenic"),              # -> loses pathogenic (depathogenized)
+        ("chr1", 250, "C", "A"): v("Benign"),                  # -> Benign->VUS (true reclassified)
+        ("chr1", 300, "G", "A"): v("Likely_pathogenic"),       # -> de-pathogenized
+        ("chr1", 400, "T", "C"): v("Pathogenic"),              # -> withdrawn (gone in cur)
+        ("chr1", 500, "A", "T"): v("Benign"),                  # -> unchanged, no finding
+    }
+    cur = {
+        ("chr1", 100, "A", "G"): v("Pathogenic", rev="criteria_provided,_single_submitter"),  # 1-star
+        ("chr1", 200, "C", "T"): v("Uncertain_significance"),
+        ("chr1", 250, "C", "A"): v("Uncertain_significance"),
+        ("chr1", 300, "G", "A"): v("Benign"),
+        ("chr1", 500, "A", "T"): v("Benign"),
+    }
+    out = {(f.kind, f.pos): f for f in classify_clinvar_delta(prev, cur)}
+    assert out[("newly_pathogenic", 100)].tier == "moderate"   # single-submitter -> 1 star
+    assert out[("depathogenized", 200)].tier == "moderate"     # lost pathogenic status
+    assert out[("reclassified", 250)].tier == "weak"           # neither side pathogenic
+    assert out[("depathogenized", 300)].tier == "moderate"
+    assert out[("withdrawn", 400)].tier == "moderate"
+    assert not any(f.pos == 500 for f in classify_clinvar_delta(prev, cur))  # unchanged -> nothing
+
+    # Multi-submitter newly-pathogenic is the strong tier.
+    strong = classify_clinvar_delta({("chr2", 9, "A", "T"): v("Benign")},
+                                     {("chr2", 9, "A", "T"): v("Pathogenic")})
+    assert strong[0].kind == "newly_pathogenic" and strong[0].tier == "strong"
+
+
+def test_whats_new_query(genome):
+    """whats_new ranks strongest-first, filters by tier/since, and is empty before refresh."""
+    from locus import ingest, load, queries
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+
+    # No findings yet.
+    assert queries.whats_new().total == 0
+
+    rows = [
+        ("2026-06-01T00:00:00", "clinvar", "newly_pathogenic", "strong", "chr1", 100,
+         "A", "G", "rs1", "BRCA1", "strong one", "", "Benign", "Pathogenic", None),
+        ("2026-06-10T00:00:00", "pgs_catalog", "release", "info", None, None,
+         None, None, None, None, "info one", "", None, None, "2026-06"),
+    ]
+    with connect(read_only=False) as con:
+        load.append_findings(con, rows)
+
+    wn = queries.whats_new()
+    assert wn.total == 2
+    assert wn.findings[0].tier == "strong"            # strongest first
+    assert wn.counts_by_tier == {"strong": 1, "info": 1}
+    assert queries.whats_new(tier="strong").total == 1
+    assert queries.whats_new(since="2026-06-05").total == 1  # only the info one
+
+
+def test_refresh_dry_run_no_writes(genome, monkeypatch):
+    """Orchestrator (monkeypatched checkers, no network): dry-run surfaces findings but
+    writes neither the manifest nor the DB."""
+    from locus import manifest, refresh
+    from locus.config import settings
+
+    monkeypatch.setattr(refresh, "check_clinvar",
+                        lambda m: {"version": "newmd5", "checksum": "newmd5", "url": "u", "changed": True})
+    monkeypatch.setattr(refresh, "check_pgs",
+                        lambda m: {"version": "2099-01-01", "url": "u", "n_new": 3, "ids": ["PGS1"], "changed": True})
+
+    findings = refresh.run(dry_run=True)
+    kinds = {f.kind for f in findings}
+    assert "release" in kinds                 # PGS summary
+    assert "update_available" in kinds        # ClinVar update flagged (reanalysis NOT run in dry-run)
+    assert not manifest.manifest_path().exists()   # nothing written
+    assert not (settings.data_dir / "reports" / "whats_new.md").exists()

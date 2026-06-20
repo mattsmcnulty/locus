@@ -139,6 +139,18 @@ def polygenic_risk() -> PolygenicRiskReport:
 
 
 @mcp.tool()
+def whats_new(since: str = "", tier: str = "") -> queries.WhatsNew:
+    """What changed about THIS genome since the last `locus refresh` — the deterministic
+    changelog (e.g. ClinVar variants you carry that were newly classified pathogenic or
+    reclassified). Ranked strongest-first. Optionally filter by `since` (ISO date like
+    '2026-06-01') or `tier` ('strong'|'moderate'|'weak'|'info'). Empty if refresh hasn't run."""
+    err = _require_db()
+    if err:
+        return queries.WhatsNew(total=0, counts_by_tier={}, findings=[])
+    return queries.whats_new(since=since or None, tier=tier or None)
+
+
+@mcp.tool()
 def run_sql(query: str) -> dict:
     """Run a read-only SELECT against the genome database for power queries. Tables: variants
     (chrom,pos,ref,alt,rsid,gt,filter,gene,consequence,clnsig,clndn,clnrevstat,gnomad_af,gnomad_af_grpmax),

@@ -95,6 +95,12 @@ def pgs():
     return queries.polygenic_risk()
 
 
+@app.get("/api/whats_new")
+def whats_new(since: str = "", tier: str = ""):
+    _guard_db()
+    return queries.whats_new(since=since or None, tier=tier or None)
+
+
 class SqlBody(BaseModel):
     query: str
 

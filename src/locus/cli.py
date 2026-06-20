@@ -29,6 +29,8 @@ app = typer.Typer(
 )
 serve_app = typer.Typer(help="Run the query interfaces.", no_args_is_help=True)
 app.add_typer(serve_app, name="serve")
+schedule_app = typer.Typer(help="Schedule periodic `locus refresh` (macOS launchd).", no_args_is_help=True)
+app.add_typer(schedule_app, name="schedule")
 
 console = Console()
 
@@ -199,6 +201,47 @@ def pipeline(
     _annotate.run(steps=steps)
     _load.run()
     console.print("[green]Pipeline complete.[/] Try `locus serve mcp` or `locus serve api`.")
+
+
+@app.command()
+def refresh(
+    sources: str = typer.Option("all", help="Comma list: clinvar,pgs or 'all'."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Probe + report what would change; write nothing."),
+    force: bool = typer.Option(False, "--force", help="Run the per-source work even if versions look unchanged."),
+) -> None:
+    """Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis)."""
+    from . import refresh as _refresh
+
+    settings.ensure_dirs()
+    _refresh.run(sources=sources, dry_run=dry_run, force=force)
+
+
+@schedule_app.command("install")
+def schedule_install(
+    weekday: int = typer.Option(0, help="Day of week (0=Sun … 6=Sat)."),
+    hour: int = typer.Option(3, help="Hour of day (0-23), local time."),
+) -> None:
+    """Install a weekly launchd job that runs `locus refresh`."""
+    from . import schedule as _schedule
+
+    settings.ensure_dirs()
+    _schedule.install(weekday=weekday, hour=hour)
+
+
+@schedule_app.command("uninstall")
+def schedule_uninstall() -> None:
+    """Remove the scheduled refresh job."""
+    from . import schedule as _schedule
+
+    _schedule.uninstall()
+
+
+@schedule_app.command("status")
+def schedule_status() -> None:
+    """Show whether the refresh job is scheduled and loaded."""
+    from . import schedule as _schedule
+
+    _schedule.status()
 
 
 @serve_app.command("mcp")

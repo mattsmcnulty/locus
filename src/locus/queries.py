@@ -316,6 +316,70 @@ def polygenic_risk() -> list[PgsResult]:
     ]
 
 
+class WatchFinding(BaseModel):
+    ts: str = Field(description="When this finding was recorded (ISO8601)")
+    source: str
+    kind: str = Field(description="newly_pathogenic | reclassified | withdrawn | depathogenized | release")
+    tier: str = Field(description="strong | moderate | weak | info — confidence/actionability")
+    title: str
+    detail: str | None = None
+    chrom: str | None = None
+    pos: int | None = None
+    gene: str | None = None
+    rsid: str | None = None
+    old_value: str | None = Field(default=None, description="Prior classification/value")
+    new_value: str | None = Field(default=None, description="New classification/value")
+    release: str | None = None
+
+
+class WhatsNew(BaseModel):
+    total: int
+    since: str | None = None
+    counts_by_tier: dict[str, int]
+    findings: list[WatchFinding]
+    note: str = (
+        "Deterministic changelog from `locus refresh`. 'strong' = high-confidence ClinVar "
+        "reanalysis (multi-submitter/expert-panel); always confirm health-relevant hits clinically."
+    )
+
+
+_WATCH_COLS = ("ts", "source", "kind", "tier", "chrom", "pos", "rsid", "gene",
+               "title", "detail", "old_value", "new_value", "release")
+
+
+def whats_new(since: str | None = None, tier: str | None = None, limit: int = 200) -> WhatsNew:
+    """Ranked 'what changed about your genome' findings written by `locus refresh`.
+
+    Optionally filter by `since` (ISO date/datetime) and/or `tier`. Ordered strongest-first.
+    """
+    with connect(read_only=True) as con:
+        exists = con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'watch_findings'"
+        ).fetchone()[0]
+        if not exists:
+            return WhatsNew(total=0, since=since, counts_by_tier={}, findings=[])
+        where, params = ["TRUE"], []
+        if since:
+            where.append("ts >= ?")
+            params.append(since)
+        if tier:
+            where.append("tier = ?")
+            params.append(tier)
+        clause = " AND ".join(where)
+        total = con.execute(f"SELECT count(*) FROM watch_findings WHERE {clause}", params).fetchone()[0]
+        counts = dict(con.execute(
+            f"SELECT tier, count(*) FROM watch_findings WHERE {clause} GROUP BY tier", params
+        ).fetchall())
+        cols = ", ".join(_WATCH_COLS)
+        rank = "CASE tier WHEN 'strong' THEN 0 WHEN 'moderate' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END"
+        rows = con.execute(
+            f"SELECT {cols} FROM watch_findings WHERE {clause} ORDER BY {rank}, ts DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+    findings = [WatchFinding(**dict(zip(_WATCH_COLS, r, strict=True))) for r in rows]
+    return WhatsNew(total=total, since=since, counts_by_tier=counts, findings=findings)
+
+
 def overview() -> dict:
     """Summary stats about the loaded genome (counts, build, annotation coverage)."""
     with connect(read_only=True) as con:

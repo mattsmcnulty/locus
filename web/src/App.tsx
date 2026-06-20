@@ -9,9 +9,10 @@ import {
   type SqlResult,
   type Variant,
   type VariantPage,
+  type WhatsNew,
 } from "./api";
 
-type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "sql";
+type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "changelog" | "sql";
 
 export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -35,7 +36,7 @@ export function App() {
       {overview && <OverviewBar o={overview} />}
 
       <nav className="tabs">
-        {(["search", "clinical", "pgx", "ancestry", "risk", "sql"] as Tab[]).map((t) => (
+        {(["search", "clinical", "pgx", "ancestry", "risk", "changelog", "sql"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
             {t === "pgx" ? "Pharmacogenomics" : t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -48,6 +49,7 @@ export function App() {
         {tab === "pgx" && <PgxView />}
         {tab === "ancestry" && <AncestryView />}
         {tab === "risk" && <RiskView />}
+        {tab === "changelog" && <ChangelogView />}
         {tab === "sql" && <SqlView />}
       </main>
 
@@ -286,6 +288,42 @@ function RiskView() {
         they're research-grade estimates, not diagnoses, and absolute risk across ancestries is unreliable.
         Coverage shows the fraction of each score's variants callable in your genome.
       </p>
+    </section>
+  );
+}
+
+function ChangelogView() {
+  const { data, loading, error, run } = useAsync<WhatsNew>();
+  useEffect(() => {
+    run(() => api.whatsNew());
+  }, []);
+  if (loading) return <p>Loading…</p>;
+  if (error) return <div className="banner error">{error}</div>;
+  if (!data || data.total === 0)
+    return <p className="hint">Nothing new yet. Run <code>locus refresh</code> to check for newly-published findings (ClinVar reclassifications, new polygenic scores).</p>;
+  const order = ["strong", "moderate", "weak", "info"];
+  return (
+    <section>
+      <h3>What's new in your genome</h3>
+      <p className="hint">
+        {data.total} finding(s) from the last <code>locus refresh</code>
+        {Object.entries(data.counts_by_tier).map(([t, n]) => ` · ${n} ${t}`).join("")}
+      </p>
+      {order.filter((t) => data.findings.some((f) => f.tier === t)).map((tier) => (
+        <div key={tier}>
+          <h4 className={tier === "strong" ? "sig-path" : ""}>{tier[0].toUpperCase() + tier.slice(1)}</h4>
+          {data.findings.filter((f) => f.tier === tier).map((f, i) => (
+            <div key={i} className="bar-row">
+              <span className="bar-label">{f.title}</span>
+              <span className="bar-val">
+                {f.chrom ? `${f.chrom}:${f.pos?.toLocaleString()}` : f.source}
+              </span>
+              {f.detail && <span className="hint" style={{ flexBasis: "100%" }}>{f.detail}</span>}
+            </div>
+          ))}
+        </div>
+      ))}
+      <p className="hint">{data.note}</p>
     </section>
   );
 }

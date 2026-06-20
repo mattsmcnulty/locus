@@ -16,7 +16,8 @@ import duckdb
 from .config import settings
 
 # Schema is versioned so we can detect/upgrade an old store.
-SCHEMA_VERSION = 1
+# v2: added sources + watch_seen_ids + watch_findings (the "living" refresh spine).
+SCHEMA_VERSION = 2
 
 
 @contextmanager

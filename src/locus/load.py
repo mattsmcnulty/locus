@@ -168,6 +168,22 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             pgs_id VARCHAR, trait VARCHAR, raw DOUBLE, percentile DOUBLE,
             ancestry VARCHAR, n_used INTEGER, coverage DOUBLE
         );
+        -- The "living" refresh spine: which source versions we last saw, IDs already
+        -- processed, and the ranked "what's new since last run" findings. All three
+        -- are PRESERVED across a variant reload (not in run()'s drop list).
+        CREATE TABLE IF NOT EXISTS sources(
+            name VARCHAR, version VARCHAR, url VARCHAR, checksum VARCHAR,
+            license VARCHAR, last_checked VARCHAR, last_updated VARCHAR
+        );
+        CREATE TABLE IF NOT EXISTS watch_seen_ids(
+            source VARCHAR, external_id VARCHAR
+        );
+        CREATE TABLE IF NOT EXISTS watch_findings(
+            ts VARCHAR, source VARCHAR, kind VARCHAR, tier VARCHAR,
+            chrom VARCHAR, pos BIGINT, ref VARCHAR, alt VARCHAR, rsid VARCHAR, gene VARCHAR,
+            title VARCHAR, detail VARCHAR, old_value VARCHAR, new_value VARCHAR,
+            release VARCHAR
+        );
     """)
 
 
@@ -206,6 +222,39 @@ def write_ancestry(ancestry_result, pgs_scores: list) -> None:
             ])
     finally:
         con.close()
+
+
+def upsert_source(con: duckdb.DuckDBPyConnection, name: str, *, version: str, url: str = "",
+                  checksum: str = "", license: str = "", last_checked: str = "",
+                  last_updated: str = "") -> None:
+    """Record/replace the last-seen state of an external source (projection of the manifest)."""
+    con.execute("CREATE TABLE IF NOT EXISTS sources(name VARCHAR, version VARCHAR, url VARCHAR, "
+                "checksum VARCHAR, license VARCHAR, last_checked VARCHAR, last_updated VARCHAR)")
+    con.execute("DELETE FROM sources WHERE name = ?", [name])
+    con.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?)",
+                [name, version, url, checksum, license, last_checked, last_updated])
+
+
+def append_findings(con: duckdb.DuckDBPyConnection, rows: list[tuple]) -> int:
+    """Append ``watch_findings`` rows. Each row matches the watch_findings column order:
+    (ts, source, kind, tier, chrom, pos, ref, alt, rsid, gene, title, detail,
+    old_value, new_value, release)."""
+    if not rows:
+        return 0
+    con.execute("CREATE TABLE IF NOT EXISTS watch_findings(ts VARCHAR, source VARCHAR, kind VARCHAR, "
+                "tier VARCHAR, chrom VARCHAR, pos BIGINT, ref VARCHAR, alt VARCHAR, rsid VARCHAR, "
+                "gene VARCHAR, title VARCHAR, detail VARCHAR, old_value VARCHAR, new_value VARCHAR, "
+                "release VARCHAR)")
+    con.executemany("INSERT INTO watch_findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    return len(rows)
+
+
+def mark_seen(con: duckdb.DuckDBPyConnection, source: str, ids: list[str]) -> None:
+    """Record external IDs already processed for a source (e.g. PGS score IDs)."""
+    if not ids:
+        return
+    con.execute("CREATE TABLE IF NOT EXISTS watch_seen_ids(source VARCHAR, external_id VARCHAR)")
+    con.executemany("INSERT INTO watch_seen_ids VALUES (?, ?)", [(source, i) for i in ids])
 
 
 def _finalize(con: duckdb.DuckDBPyConnection) -> None:

@@ -86,6 +86,29 @@ export interface PgsResult {
   coverage: number;
 }
 
+export interface WatchFinding {
+  ts: string;
+  source: string;
+  kind: string;
+  tier: string;
+  title: string;
+  detail: string | null;
+  chrom: string | null;
+  pos: number | null;
+  gene: string | null;
+  rsid: string | null;
+  old_value: string | null;
+  new_value: string | null;
+  release: string | null;
+}
+export interface WhatsNew {
+  total: number;
+  since: string | null;
+  counts_by_tier: Record<string, number>;
+  findings: WatchFinding[];
+  note: string;
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error((await r.json().catch(() => ({ detail: r.statusText }))).detail ?? r.statusText);
@@ -103,6 +126,7 @@ export const api = {
     get<PgxResult>(`/api/pgx?gene=${encodeURIComponent(gene)}&drug=${encodeURIComponent(drug)}`),
   ancestry: () => get<AncestrySummary>("/api/ancestry"),
   pgs: () => get<PgsResult[]>("/api/pgs"),
+  whatsNew: () => get<WhatsNew>("/api/whats_new"),
   sql: async (query: string): Promise<SqlResult> => {
     const r = await fetch("/api/sql", {
       method: "POST",

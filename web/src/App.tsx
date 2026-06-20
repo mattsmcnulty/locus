@@ -1,10 +1,15 @@
+import { geoNaturalEarth1, geoPath } from "d3-geo";
 import { useEffect, useState } from "react";
+import { feature } from "topojson-client";
+import worldData from "world-atlas/countries-110m.json";
 import {
   api,
+  type AncestryComponent,
   type AncestrySummary,
   type AssociationPage,
   classifyQuery,
   type Overview,
+  type PcaPoint,
   type PgsResult,
   type PgxResult,
   type SqlResult,
@@ -24,6 +29,34 @@ const SUPERPOP_COLORS: Record<string, string> = {
 const SUPERPOP_NAMES: Record<string, string> = {
   EUR: "European", AFR: "African", EAS: "East Asian", SAS: "South Asian", AMR: "American",
   MID: "Middle Eastern", OCE: "Oceanian",
+};
+
+// Approximate ancestral-homeland coordinates [lng, lat] + continent for reference populations,
+// so the geographic map can place a marker per population the genome is closest to. (1000 Genomes
+// codes use the ancestral homeland, not the sampling site — e.g. CEU is placed in NW Europe.)
+const POP_COORDS: Record<string, { lng: number; lat: number; group: string }> = {
+  // 1000 Genomes — European
+  GBR: { lng: -1.5, lat: 53, group: "EUR" }, CEU: { lng: 7, lat: 51, group: "EUR" },
+  FIN: { lng: 25, lat: 62, group: "EUR" }, IBS: { lng: -3.7, lat: 40, group: "EUR" },
+  TSI: { lng: 11, lat: 43, group: "EUR" },
+  // HGDP — European
+  French: { lng: 2.3, lat: 46.5, group: "EUR" }, Orcadian: { lng: -3, lat: 59, group: "EUR" },
+  Basque: { lng: -2, lat: 43, group: "EUR" }, Sardinian: { lng: 9, lat: 40, group: "EUR" },
+  BergamoItalian: { lng: 9.7, lat: 45.7, group: "EUR" }, Tuscan: { lng: 11, lat: 43.3, group: "EUR" },
+  Russian: { lng: 37, lat: 56, group: "EUR" }, Adygei: { lng: 40, lat: 44, group: "MID" },
+  // 1000 Genomes — African / East Asian / South Asian / American
+  YRI: { lng: 8, lat: 7, group: "AFR" }, LWK: { lng: 37, lat: 0, group: "AFR" },
+  GWD: { lng: -15, lat: 13, group: "AFR" }, MSL: { lng: -12, lat: 8, group: "AFR" },
+  ESN: { lng: 8, lat: 9, group: "AFR" }, ACB: { lng: -59, lat: 13, group: "AFR" },
+  ASW: { lng: -98, lat: 38, group: "AFR" },
+  CHB: { lng: 116, lat: 40, group: "EAS" }, JPT: { lng: 139, lat: 36, group: "EAS" },
+  CHS: { lng: 113, lat: 28, group: "EAS" }, CDX: { lng: 100, lat: 22, group: "EAS" },
+  KHV: { lng: 106, lat: 11, group: "EAS" },
+  GIH: { lng: 72, lat: 23, group: "SAS" }, PJL: { lng: 74, lat: 31, group: "SAS" },
+  BEB: { lng: 90, lat: 24, group: "SAS" }, STU: { lng: 81, lat: 8, group: "SAS" },
+  ITU: { lng: 79, lat: 13, group: "SAS" },
+  MXL: { lng: -102, lat: 23, group: "AMR" }, PUR: { lng: -66, lat: 18, group: "AMR" },
+  CLM: { lng: -74, lat: 4, group: "AMR" }, PEL: { lng: -77, lat: -12, group: "AMR" },
 };
 
 export function App() {
@@ -216,6 +249,46 @@ function PgxView() {
   );
 }
 
+function AncestryMap({ populations }: { populations: AncestryComponent[] }) {
+  const W = 460, H = 300;
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const world: any = feature(worldData as any, (worldData as any).objects.countries);
+  const proj = geoNaturalEarth1().fitExtent([[4, 4], [W - 4, H - 4]], world);
+  const path = geoPath(proj);
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+  const markers = populations
+    .map((p) => ({ p, c: POP_COORDS[p.code] }))
+    .filter((m): m is { p: AncestryComponent; c: { lng: number; lat: number; group: string } } => !!m.c)
+    .map((m) => ({ ...m, xy: proj([m.c.lng, m.c.lat]) }))
+    .filter((m) => m.xy);
+  return (
+    <>
+      <h3 style={{ marginTop: "1.5rem" }}>Ancestral homelands (geographic)</h3>
+      <svg width={W} height={H} className="geo">
+        {world.features.map((f: unknown, i: number) => (
+          <path key={i} d={path(f as never) ?? ""} className="geo-land" />
+        ))}
+        {markers.map((m) => {
+          const [x, y] = m.xy as [number, number];
+          const r = 5 + m.p.proportion * 32;
+          return (
+            <g key={m.p.code}>
+              <circle cx={x} cy={y} r={r} fill={SUPERPOP_COLORS[m.c.group] ?? "#fff"}
+                opacity={0.5} stroke="white" strokeWidth={1} />
+              <text x={x} y={y - r - 3} className="geo-lbl" textAnchor="middle">
+                {m.p.name.split(" (")[0]} {(m.p.proportion * 100).toFixed(0)}%
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <p className="hint">Markers sit at each population's ancestral homeland, sized by your
+        sub-continental proportion. Placement is approximate — it reflects genetic similarity, not a
+        precise birthplace.</p>
+    </>
+  );
+}
+
 function AncestryView() {
   const { data, loading, error, run } = useAsync<AncestrySummary>();
   useEffect(() => {
@@ -232,9 +305,20 @@ function AncestryView() {
   const ys = pts.map((p) => p.pc2);
   const [xmin, xmax] = [Math.min(...xs), Math.max(...xs)];
   const [ymin, ymax] = [Math.min(...ys), Math.max(...ys)];
-  const W = 360, H = 260, pad = 30;
+  const W = 460, H = 320, pad = 34;
   const sx = (v: number) => pad + ((v - xmin) / (xmax - xmin || 1)) * (W - 2 * pad);
   const sy = (v: number) => H - pad - ((v - ymin) / (ymax - ymin || 1)) * (H - 2 * pad);
+
+  // Continent halos + labels: group reference points by continent and draw a soft blob behind each.
+  const groups: Record<string, PcaPoint[]> = {};
+  for (const p of pts.filter((q) => !q.is_sample)) (groups[p.group ?? "?"] ??= []).push(p);
+  const halos = Object.entries(groups).map(([g, ps]) => {
+    const cx = ps.reduce((s, p) => s + sx(p.pc1), 0) / ps.length;
+    const cy = ps.reduce((s, p) => s + sy(p.pc2), 0) / ps.length;
+    const rms = Math.sqrt(ps.reduce((s, p) => s + (sx(p.pc1) - cx) ** 2 + (sy(p.pc2) - cy) ** 2, 0) / ps.length);
+    return { g, cx, cy, r: Math.max(20, rms * 1.6 + 12), color: SUPERPOP_COLORS[g] ?? "#8b92a7" };
+  });
+  const x0 = sx(0), y0 = sy(0);  // origin axes (PC space is centered near 0)
 
   return (
     <section>
@@ -254,11 +338,27 @@ function AncestryView() {
           <span className="bar-val">{(c.proportion * 100).toFixed(0)}%</span>
         </div>
       ))}
-      <h3>Where you fall among world populations (PC1 × PC2)</h3>
+      <AncestryMap populations={data.populations} />
+
+      <h3 style={{ marginTop: "1.5rem" }}>Genetic-similarity map (PC1 × PC2)</h3>
       <svg width={W} height={H} className="pca">
+        {/* soft continent regions */}
+        {halos.map((h) => (
+          <circle key={`halo-${h.g}`} cx={h.cx} cy={h.cy} r={h.r} fill={h.color} opacity={0.1} />
+        ))}
+        {/* origin axes */}
+        <line x1={x0} y1={pad} x2={x0} y2={H - pad} className="pca-axis" />
+        <line x1={pad} y1={y0} x2={W - pad} y2={y0} className="pca-axis" />
+        <text x={W - pad} y={y0 - 5} className="pca-axislbl" textAnchor="end">PC1 →</text>
+        <text x={x0 + 5} y={pad + 2} className="pca-axislbl">↑ PC2</text>
+        {/* continent labels */}
+        {halos.map((h) => (
+          <text key={`lbl-${h.g}`} x={h.cx} y={h.cy - h.r - 2} className="pca-grouplbl"
+            fill={h.color} textAnchor="middle">{h.g}</text>
+        ))}
         {pts.filter((p) => !p.is_sample).map((p) => (
           <circle key={p.label} cx={sx(p.pc1)} cy={sy(p.pc2)} r={5}
-            fill={SUPERPOP_COLORS[p.group ?? ""] ?? "#8b92a7"} opacity={0.75}>
+            fill={SUPERPOP_COLORS[p.group ?? ""] ?? "#8b92a7"} opacity={0.85}>
             <title>{p.label} ({p.group})</title>
           </circle>
         ))}
@@ -278,7 +378,8 @@ function AncestryView() {
         <span className="legend-item"><span className="legend-dot" style={{ background: "var(--path)" }} /> you</span>
       </div>
       <p className="hint">Each dot is a reference population (1000 Genomes + HGDP), colored by continent;
-        your genome (★ red) sits among them. {data.note}</p>
+        your genome (red) sits among them. This is genetic-similarity space (PC1×PC2), not geography.
+        {" "}{data.note}</p>
     </section>
   );
 }

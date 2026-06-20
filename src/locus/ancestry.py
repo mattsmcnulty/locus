@@ -40,7 +40,7 @@ SUPERPOPS = {
 # Fine population display names (1000 Genomes 26 populations + HGDP groups if present).
 POPULATIONS = {
     # EUR
-    "GBR": "British (England/Scotland)", "CEU": "Northwest European (Utah)", "IBS": "Iberian (Spain)",
+    "GBR": "British (England/Scotland)", "CEU": "Northwest European", "IBS": "Iberian (Spain)",
     "TSI": "Tuscan (Italy)", "FIN": "Finnish",
     # SAS
     "GIH": "Gujarati", "PJL": "Punjabi", "BEB": "Bengali", "STU": "Sri Lankan Tamil", "ITU": "Telugu",

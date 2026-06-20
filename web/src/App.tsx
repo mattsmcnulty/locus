@@ -1,4 +1,4 @@
-import { geoNaturalEarth1, geoPath } from "d3-geo";
+import { geoMercator, geoPath } from "d3-geo";
 import { useEffect, useState } from "react";
 import { feature } from "topojson-client";
 import worldData from "world-atlas/countries-110m.json";
@@ -250,41 +250,57 @@ function PgxView() {
 }
 
 function AncestryMap({ populations }: { populations: AncestryComponent[] }) {
-  const W = 460, H = 300;
+  const W = 720, H = 420;
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const world: any = feature(worldData as any, (worldData as any).objects.countries);
-  const proj = geoNaturalEarth1().fitExtent([[4, 4], [W - 4, H - 4]], world);
+  const cand = populations
+    .map((p) => ({ p, c: POP_COORDS[p.code] }))
+    .filter((m): m is { p: AncestryComponent; c: { lng: number; lat: number; group: string } } => !!m.c);
+  // Zoom to the markers' region: fit the projection to a MultiPoint of the homelands, enforcing a
+  // minimum span so a tight cluster still shows surrounding context. Falls back to a broad world
+  // view if no homelands are known.
+  const coords: [number, number][] = cand.map((m) => [m.c.lng, m.c.lat]);
+  if (!coords.length) {
+    coords.push([-150, -45], [160, 70]);
+  } else {
+    const lons = coords.map((c) => c[0]), lats = coords.map((c) => c[1]);
+    const cLon = (Math.min(...lons) + Math.max(...lons)) / 2;
+    const cLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+    const MIN = 18;  // degrees
+    if (Math.max(Math.max(...lons) - Math.min(...lons), Math.max(...lats) - Math.min(...lats)) < MIN) {
+      coords.push([cLon - MIN / 2, cLat - MIN / 2], [cLon + MIN / 2, cLat + MIN / 2]);
+    }
+  }
+  const proj = geoMercator()
+    .fitExtent([[150, 90], [W - 150, H - 90]], { type: "MultiPoint", coordinates: coords } as any)
+    .clipExtent([[0, 0], [W, H]]);  // clip far geometry so Mercator's poles can't blow up
   const path = geoPath(proj);
   /* eslint-enable @typescript-eslint/no-explicit-any */
-  const markers = populations
-    .map((p) => ({ p, c: POP_COORDS[p.code] }))
-    .filter((m): m is { p: AncestryComponent; c: { lng: number; lat: number; group: string } } => !!m.c)
-    .map((m) => ({ ...m, xy: proj([m.c.lng, m.c.lat]) }))
-    .filter((m) => m.xy);
+  const markers = cand.map((m) => ({ ...m, xy: proj([m.c.lng, m.c.lat]) })).filter((m) => m.xy);
   return (
     <>
       <h3 style={{ marginTop: "1.5rem" }}>Ancestral homelands (geographic)</h3>
-      <svg width={W} height={H} className="geo">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" className="geo">
         {world.features.map((f: unknown, i: number) => (
           <path key={i} d={path(f as never) ?? ""} className="geo-land" />
         ))}
         {markers.map((m) => {
           const [x, y] = m.xy as [number, number];
-          const r = 5 + m.p.proportion * 32;
+          const r = 6 + m.p.proportion * 38;
           return (
             <g key={m.p.code}>
               <circle cx={x} cy={y} r={r} fill={SUPERPOP_COLORS[m.c.group] ?? "#fff"}
-                opacity={0.5} stroke="white" strokeWidth={1} />
-              <text x={x} y={y - r - 3} className="geo-lbl" textAnchor="middle">
+                opacity={0.5} stroke="white" strokeWidth={1.2} />
+              <text x={x + r + 4} y={y + 3} className="geo-lbl">
                 {m.p.name.split(" (")[0]} {(m.p.proportion * 100).toFixed(0)}%
               </text>
             </g>
           );
         })}
       </svg>
-      <p className="hint">Markers sit at each population's ancestral homeland, sized by your
-        sub-continental proportion. Placement is approximate — it reflects genetic similarity, not a
-        precise birthplace.</p>
+      <p className="hint">Auto-zoomed to where your ancestry sits. Markers are at each population's
+        ancestral homeland, sized by your sub-continental proportion — approximate, reflecting genetic
+        similarity, not a precise birthplace.</p>
     </>
   );
 }

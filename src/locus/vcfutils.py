@@ -89,21 +89,32 @@ def plain_to_chr_map() -> dict[str, str]:
     return m
 
 
+def canonical_chrom(contig: str) -> str:
+    """Canonicalize a single contig to its UCSC chr-prefixed name.
+
+    Prepend ``chr`` to a non-prefixed contig, with the mitochondrion ``MT`` ->
+    ``chrM``; scaffolds get the prefix too (``1_KI270706v1_random`` ->
+    ``chr1_KI270706v1_random``). Already-``chr`` names are returned unchanged, so
+    this is idempotent.
+    """
+    if contig.startswith("chr"):
+        return contig
+    return "chrM" if contig == "MT" else f"chr{contig}"
+
+
 def chr_rename_map(contigs: list[str]) -> dict[str, str]:
     """Rename map to canonicalize *any* contig list to UCSC chr-prefixed names.
 
     The rule that matches the GRCh38 no-alt analysis set (and ClinVar/gnomAD via
-    chr-prefixing) is: prepend ``chr`` to every non-prefixed contig, with the
-    mitochondrion ``MT`` -> ``chrM``. Handles unplaced/unlocalized scaffolds too
-    (``1_KI270706v1_random`` -> ``chr1_KI270706v1_random``,
-    ``Un_KI270302v1`` -> ``chrUn_KI270302v1``). Already-``chr`` names are left as-is.
-    Only contigs that change are returned.
+    chr-prefixing) is :func:`canonical_chrom`. Handles unplaced/unlocalized
+    scaffolds too (``Un_KI270302v1`` -> ``chrUn_KI270302v1``). Already-``chr``
+    names are left as-is. Only contigs that change are returned.
     """
     out: dict[str, str] = {}
     for c in contigs:
-        if c.startswith("chr"):
-            continue
-        out[c] = "chrM" if c == "MT" else f"chr{c}"
+        canon = canonical_chrom(c)
+        if canon != c:
+            out[c] = canon
     return out
 
 

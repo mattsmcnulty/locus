@@ -155,6 +155,73 @@ def test_noncprefixed_bcftools_gvcf(tmp_path):
     assert not any(r.split("\t")[4] == "." for r in out)  # no hom-ref blocks left
 
 
+def test_structural_overlap_chr_canonicalized(genome):
+    """CNV/SV ship non-chr-prefixed ('21'); the loader must canonicalize to 'chr21'
+    so region queries (always chr-prefixed) can match. Regression: this silently
+    returned 0 for every region before the fix."""
+    from locus import ingest, load, queries
+    from locus.config import settings
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+
+    ov = queries.overview()
+    assert ov["cnv"] >= 1 and ov["sv"] >= 1
+
+    hits = queries.structural_overlap("chr21:1-60")
+    assert len(hits) >= 2, "structural_overlap must find the fixture CNV + SV"
+    assert all(h.chrom == "chr21" for h in hits)  # contigs canonicalized at load
+    assert {"cnv", "sv"} <= {h.kind for h in hits}
+
+
+def test_mcp_stdio_tools_respond(genome):
+    """End-to-end over the real stdio MCP path a client (Claude) uses: list tools,
+    then call the two handlers that were reported timing out. Guards against both
+    the structural chr-prefix bug and any future serialization/hang regression."""
+    import asyncio
+    import os
+
+    from locus import ingest, load
+    from locus.config import settings
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    env = {**os.environ, "LOCUS_DATA_DIR": str(genome)}
+    params = StdioServerParameters(command=sys.executable, args=["-m", "locus.mcp_server"], env=env)
+
+    def _result_list(call_result):
+        sc = call_result.structuredContent
+        if isinstance(sc, dict) and "result" in sc:
+            return sc["result"]
+        return sc
+
+    async def _run():
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await asyncio.wait_for(session.initialize(), timeout=30)
+                tools = await asyncio.wait_for(session.list_tools(), timeout=30)
+                names = {t.name for t in tools.tools}
+                assert {"structural_variants", "polygenic_risk", "genome_overview"} <= names
+
+                # The handler that was effectively broken: must return >0 hits now.
+                sv = await asyncio.wait_for(
+                    session.call_tool("structural_variants", {"region": "chr21:1-60"}), timeout=30
+                )
+                assert not sv.isError
+                assert len(_result_list(sv)) >= 2
+
+                # Must respond promptly without hanging (empty is fine on the fixture,
+                # which has no ancestry/PGS step).
+                pr = await asyncio.wait_for(session.call_tool("polygenic_risk", {}), timeout=30)
+                assert not pr.isError
+
+    asyncio.run(_run())
+
+
 def test_region_parsing():
     from locus.queries import parse_region
 

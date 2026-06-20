@@ -20,6 +20,7 @@ from rich.console import Console
 from . import artifacts
 from .config import settings
 from .db import SCHEMA_VERSION
+from .vcfutils import canonical_chrom
 
 console = Console()
 
@@ -224,7 +225,7 @@ def load_cnv(con: duckdb.DuckDBPyConnection, cnv_vcf: Path) -> int:
         cn = v.format("CN")
         cn_val = int(cn[0][0]) if cn is not None and len(cn) else None
         rows.append((
-            v.CHROM, int(v.POS), int(v.INFO.get("END") or v.end),
+            canonical_chrom(v.CHROM), int(v.POS), int(v.INFO.get("END") or v.end),
             _as_str(v.INFO.get("SVTYPE")), _as_str(v.ALT),
             cn_val, _coerce_int(v.INFO.get("SVLEN")),
             "PASS" if v.FILTER is None else v.FILTER, None,
@@ -242,7 +243,7 @@ def load_sv(con: duckdb.DuckDBPyConnection, sv_vcf: Path) -> int:
         pr = v.format("PR")
         sr = v.format("SR")
         rows.append((
-            v.CHROM, int(v.POS), int(v.INFO.get("END") or v.end or v.POS),
+            canonical_chrom(v.CHROM), int(v.POS), int(v.INFO.get("END") or v.end or v.POS),
             _as_str(v.INFO.get("SVTYPE")), _as_str(v.ALT),
             _coerce_int(v.INFO.get("SVLEN")), _as_str(v.INFO.get("MATEID")),
             "PASS" if v.FILTER is None else v.FILTER,

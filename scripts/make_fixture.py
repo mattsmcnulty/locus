@@ -62,6 +62,51 @@ def build_vcf() -> str:
     return header + "\n" + "\n".join(rows) + "\n"
 
 
+# CNV/SV are emitted with a NON-chr-prefixed contig ("21") on purpose: that is how
+# sequencing.com/DRAGEN ships these files, and the loader must canonicalize them to
+# "chr21" so region queries (which are always chr-prefixed) can match.
+def build_cnv_vcf() -> str:
+    return (
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=21,length=60>\n"
+        '##ALT=<ID=DEL,Description="Deletion">\n'
+        '##FILTER=<ID=PASS,Description="All filters passed">\n'
+        '##INFO=<ID=END,Number=1,Type=Integer,Description="End position">\n'
+        '##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">\n'
+        '##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Length">\n'
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+        '##FORMAT=<ID=CN,Number=1,Type=Integer,Description="Copy number">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+        "21\t10\t.\tN\t<DEL>\t50\tPASS\tEND=30;SVTYPE=DEL;SVLEN=-20\tGT:CN\t0/1:1\n"
+    )
+
+
+def build_sv_vcf() -> str:
+    return (
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=21,length=60>\n"
+        '##ALT=<ID=INS,Description="Insertion">\n'
+        '##FILTER=<ID=PASS,Description="All filters passed">\n'
+        '##INFO=<ID=END,Number=1,Type=Integer,Description="End position">\n'
+        '##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">\n'
+        '##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Length">\n'
+        '##INFO=<ID=MATEID,Number=1,Type=String,Description="Mate id">\n'
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+        '##FORMAT=<ID=PR,Number=.,Type=Integer,Description="Paired-read support">\n'
+        '##FORMAT=<ID=SR,Number=.,Type=Integer,Description="Split-read support">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+        "21\t15\t.\tN\t<INS>\t50\tPASS\tSVTYPE=INS;SVLEN=58\tGT:PR:SR\t0/1:10,5:3,2\n"
+    )
+
+
+def _write_indexed_vcf(text: str, path: Path) -> Path:
+    path.write_text(text)
+    subprocess.run(["bgzip", "-f", str(path)], check=True)
+    gz = Path(str(path) + ".gz")
+    subprocess.run(["tabix", "-p", "vcf", str(gz)], check=True)
+    return gz
+
+
 def main(base: Path) -> None:
     ref_dir = base / "reference"
     genome_dir = base / "genome"
@@ -82,8 +127,14 @@ def main(base: Path) -> None:
     vcf_gz = genome_dir / "Synthetic-SQF-30x-WGS.snp-indel.genome.vcf.gz"
     subprocess.run(["tabix", "-p", "vcf", str(vcf_gz)], check=True)
 
+    # CNV + SV (non-chr-prefixed contigs, like the real DRAGEN outputs).
+    cnv_gz = _write_indexed_vcf(build_cnv_vcf(), genome_dir / "Synthetic-SQF-30x-WGS.cnv.vcf")
+    sv_gz = _write_indexed_vcf(build_sv_vcf(), genome_dir / "Synthetic-SQF-30x-WGS.sv.vcf")
+
     print(f"reference : {fa_gz}")
     print(f"gVCF      : {vcf_gz}")
+    print(f"CNV       : {cnv_gz}")
+    print(f"SV        : {sv_gz}")
     print(f"\nRun:  LOCUS_DATA_DIR={base} uv run locus ingest")
 
 

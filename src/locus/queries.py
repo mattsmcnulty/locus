@@ -202,8 +202,18 @@ def pharmacogenomics(gene: str | None = None, drug: str | None = None) -> PgxRes
 
 
 def structural_overlap(region: str, limit: int = 100) -> list[StructuralHit]:
-    """CNV/SV records overlapping a region."""
+    """CNV/SV records overlapping a region.
+
+    Matches the chromosome with *or* without a ``chr`` prefix, so it is correct
+    whether the cnv/sv tables were loaded with canonicalized contigs (the current
+    loader) or the older non-prefixed form.
+    """
     chrom, start, end = parse_region(region)
+    stem = chrom[3:] if chrom.startswith("chr") else chrom
+    chrom_opts = [chrom, stem]
+    if stem == "M":
+        chrom_opts.append("MT")  # mitochondrion: chrM <-> MT
+    placeholders = ", ".join("?" for _ in chrom_opts)
     hits: list[StructuralHit] = []
     with connect(read_only=True) as con:
         for kind, tbl in (("cnv", "cnv"), ("sv", "sv")):
@@ -211,8 +221,8 @@ def structural_overlap(region: str, limit: int = 100) -> list[StructuralHit]:
             rows = con.execute(
                 f"""SELECT chrom, pos, "end", svtype, {cn_col}, svlen, filter, genes
                     FROM {tbl}
-                    WHERE chrom = ? AND pos <= ? AND "end" >= ? LIMIT ?""",
-                [chrom, end, start, limit],
+                    WHERE chrom IN ({placeholders}) AND pos <= ? AND "end" >= ? LIMIT ?""",
+                [*chrom_opts, end, start, limit],
             ).fetchall()
             for r in rows:
                 hits.append(StructuralHit(

@@ -160,6 +160,27 @@ HGDP_PSAM_URL = "https://www.dropbox.com/s/0zg57558fqpj3w1/hgdp.psam?dl=1"
 
 ALPHAMISSENSE_URL = "https://zenodo.org/records/8208688/files/AlphaMissense_hg38.tsv.gz?download=1"
 
+# Haplogrep2 (pure-Java jar, native on the JVM) for mtDNA maternal-lineage haplogroups.
+# Haplogrep3 ships only linux/windows native binaries (no macOS/jar), so we use v2.4.0.
+HAPLOGREP_URL = "https://github.com/seppinho/haplogrep-cmd/releases/download/v2.4.0/haplogrep.zip"
+
+
+def setup_haplogrep() -> Path:
+    """Download the Haplogrep2 jar for mtDNA haplogroup classification."""
+    d = settings.annotations_dir / "haplogrep"
+    jar = d / "haplogrep.jar"
+    if jar.exists():
+        console.print(f"[green]Haplogrep present[/] → {jar}")
+        return jar
+    d.mkdir(parents=True, exist_ok=True)
+    z = d / "haplogrep.zip"
+    console.print("[bold]Downloading Haplogrep2 (~7 MB)…[/]")
+    _curl(HAPLOGREP_URL, z)
+    shell.run(["unzip", "-o", "-q", str(z), "-d", str(d)])
+    z.unlink(missing_ok=True)
+    console.print(f"[green]Haplogrep ready[/] → {jar}")
+    return jar
+
 
 def setup_alphamissense() -> None:
     """Download AlphaMissense hg38 + prepare a slim, tabix-indexed file for bcftools annotate."""
@@ -239,6 +260,7 @@ TARGETS = {
     "pharmcat": setup_pharmcat,
     "ancestry": setup_ancestry,
     "alphamissense": setup_alphamissense,
+    "haplogrep": setup_haplogrep,
 }
 
 

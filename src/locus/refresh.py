@@ -225,14 +225,17 @@ def _reanalyze_clinvar() -> list[Finding]:
 
 
 def _summarize_pgs(check: dict) -> list[Finding]:
-    """Phase 1: record that new PGS scores were published (suggest-only; scoring is Phase 2)."""
+    """Suggest-only PGS watcher: report new scores; never auto-add (ancestry-mismatch +
+    runtime risk). The user adds relevant IDs to pgs.CURATED_PGS by hand."""
     n = check.get("n_new", 0)
     if not n:
         return []
+    ids = check.get("ids", [])
+    sample = ", ".join(ids[:8]) + (" …" if len(ids) > 8 else "")
     return [Finding(source="pgs_catalog", kind="release", tier="info",
-                    title=f"{n} new polygenic score(s) published",
-                    detail="New PGS Catalog release. Review and add relevant scores to track "
-                           "(suggest-only; scores are not auto-added).",
+                    title=f"{n} new polygenic score(s) published — review to track",
+                    detail=f"Suggest-only: not auto-added. Add relevant IDs to pgs.CURATED_PGS, "
+                           f"then `locus ancestry`. New: {sample}",
                     release=check.get("version"))]
 
 

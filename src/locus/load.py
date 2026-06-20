@@ -184,6 +184,11 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             title VARCHAR, detail VARCHAR, old_value VARCHAR, new_value VARCHAR,
             release VARCHAR
         );
+        -- Single-SNP traits / wellness + HLA proxy (preserved across a variant reload).
+        CREATE TABLE IF NOT EXISTS traits(
+            rsid VARCHAR, category VARCHAR, trait VARCHAR, genotype VARCHAR,
+            dosage INTEGER, effect_allele VARCHAR, interpretation VARCHAR, note VARCHAR
+        );
     """)
 
 
@@ -220,6 +225,28 @@ def write_ancestry(ancestry_result, pgs_scores: list) -> None:
                 (s.pgs_id, s.trait, s.raw, s.percentile, s.ancestry, s.n_used, s.coverage)
                 for s in pgs_scores
             ])
+    finally:
+        con.close()
+
+
+def write_traits(results: list) -> None:
+    """Replace the ``traits`` table with freshly-computed tag-SNP results.
+
+    Standalone step (``locus traits``) — like write_ancestry, it touches only its own
+    table and leaves the variant tables intact.
+    """
+    import duckdb as _d
+
+    con = _d.connect(str(settings.db_path))
+    try:
+        con.execute("DROP TABLE IF EXISTS traits")
+        _create_schema(con)
+        if results:
+            con.executemany(
+                "INSERT INTO traits VALUES (?,?,?,?,?,?,?,?)",
+                [(r.rsid, r.category, r.trait, r.genotype, r.dosage, r.effect_allele,
+                  r.interpretation, r.note) for r in results],
+            )
     finally:
         con.close()
 

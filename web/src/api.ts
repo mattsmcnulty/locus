@@ -109,6 +109,22 @@ export interface WhatsNew {
   note: string;
 }
 
+export interface TraitResult {
+  rsid: string;
+  category: string;
+  trait: string;
+  genotype: string;
+  dosage: number | null;
+  effect_allele: string;
+  interpretation: string;
+  note: string | null;
+}
+export interface TraitsReport {
+  total: number;
+  traits: TraitResult[];
+  note: string;
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error((await r.json().catch(() => ({ detail: r.statusText }))).detail ?? r.statusText);
@@ -127,6 +143,8 @@ export const api = {
   ancestry: () => get<AncestrySummary>("/api/ancestry"),
   pgs: () => get<PgsResult[]>("/api/pgs"),
   whatsNew: () => get<WhatsNew>("/api/whats_new"),
+  traits: () => get<TraitsReport>("/api/traits"),
+  secondaryFindings: () => get<VariantPage>("/api/secondary_findings"),
   sql: async (query: string): Promise<SqlResult> => {
     const r = await fetch("/api/sql", {
       method: "POST",

@@ -101,6 +101,18 @@ def whats_new(since: str = "", tier: str = ""):
     return queries.whats_new(since=since or None, tier=tier or None)
 
 
+@app.get("/api/secondary_findings")
+def secondary_findings(limit: int = 100, offset: int = 0):
+    _guard_db()
+    return queries.secondary_findings(limit=limit, offset=offset)
+
+
+@app.get("/api/traits")
+def traits(category: str = ""):
+    _guard_db()
+    return queries.traits(category=category or None)
+
+
 class SqlBody(BaseModel):
     query: str
 

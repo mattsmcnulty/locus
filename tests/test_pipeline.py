@@ -299,6 +299,60 @@ def test_whats_new_query(genome):
     assert queries.whats_new(since="2026-06-05").total == 1  # only the info one
 
 
+def test_panels_integrity():
+    """Tag-SNP data sanity: each has 0/1/2 interpretations, chr-prefixed coords, distinct
+    single-base effect/other alleles; ACMG gene set is non-empty + uppercase."""
+    from locus.panels import ACMG_SF_GENES, TAG_SNPS
+
+    assert len(ACMG_SF_GENES) >= 70
+    assert all(g == g.upper() and g.isalnum() for g in ACMG_SF_GENES)
+    assert {"BRCA1", "BRCA2", "LDLR", "KCNQ1"} <= ACMG_SF_GENES
+    seen = set()
+    for s in TAG_SNPS:
+        assert set(s.interp) == {0, 1, 2}, f"{s.rsid} needs 0/1/2 interpretations"
+        assert s.chrom.startswith("chr")
+        assert s.effect_allele in "ACGT" and s.other_allele in "ACGT"
+        assert s.effect_allele != s.other_allele
+        assert s.rsid not in seen
+        seen.add(s.rsid)
+    # The clinically-important HLA-B*57:01 proxy must be present and flagged pharmacogenomic.
+    hla = next(s for s in TAG_SNPS if s.rsid == "rs2395029")
+    assert hla.category == "pharmacogenomic"
+
+
+def test_secondary_findings_acmg_filter(genome):
+    """ACMG SF returns pathogenic variants only in actionable genes."""
+    from locus import ingest, load, queries
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:
+        con.executemany(
+            "INSERT INTO variants (chrom, pos, ref, alt, gene, clnsig) VALUES (?,?,?,?,?,?)",
+            [("chr17", 43000000, "A", "G", "BRCA1", "Pathogenic"),       # ACMG gene -> included
+             ("chr1", 12345, "C", "T", "MADEUPGENE", "Pathogenic")],     # not ACMG -> excluded
+        )
+    sf = queries.secondary_findings()
+    genes = {h.gene for h in sf.hits}
+    assert "BRCA1" in genes
+    assert "MADEUPGENE" not in genes
+
+
+def test_traits_compute_runs(genome):
+    """traits.compute() runs end-to-end via markers_genotypes; on the chr21-only fixture every
+    tag SNP is off-contig, so all come back not-callable (exercises the wiring without crashing)."""
+    from locus import ingest, traits
+    from locus.config import settings
+    from locus.panels import TAG_SNPS
+
+    ingest.run(settings.genome_dir, normalize=True)
+    results = traits.compute()
+    assert len(results) == len(TAG_SNPS)
+    assert all(r.dosage is None and r.genotype == "—" for r in results)  # off-contig fixture
+
+
 def test_refresh_dry_run_no_writes(genome, monkeypatch):
     """Orchestrator (monkeypatched checkers, no network): dry-run surfaces findings but
     writes neither the manifest nor the DB."""

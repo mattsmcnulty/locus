@@ -172,6 +172,18 @@ def allele_frequency(region_or_variant: str) -> VariantPage:
     return lookup_by_region(region_or_variant, limit=50, offset=0)
 
 
+def secondary_findings(limit: int = 100, offset: int = 0) -> VariantPage:
+    """ACMG SF v3.2 secondary findings: pathogenic / likely-pathogenic ClinVar variants in
+    the medically-actionable gene set. 'No findings' is a defensible, reassuring result."""
+    from .panels import ACMG_SF_GENES
+
+    genes = sorted(ACMG_SF_GENES)
+    placeholders = ", ".join("?" for _ in genes)
+    where = ("(lower(clnsig) LIKE '%pathogenic%' AND lower(clnsig) NOT LIKE '%benign%' "
+             f"AND lower(clnsig) NOT LIKE '%conflicting%') AND upper(gene) IN ({placeholders})")
+    return _var_select(where, [g.upper() for g in genes], limit, offset)
+
+
 def pharmacogenomics(gene: str | None = None, drug: str | None = None) -> PgxResult:
     with connect(read_only=True) as con:
         gwhere, gparams = ("TRUE", [])
@@ -378,6 +390,46 @@ def whats_new(since: str | None = None, tier: str | None = None, limit: int = 20
         ).fetchall()
     findings = [WatchFinding(**dict(zip(_WATCH_COLS, r, strict=True))) for r in rows]
     return WhatsNew(total=total, since=since, counts_by_tier=counts, findings=findings)
+
+
+class TraitResult(BaseModel):
+    rsid: str
+    category: str = Field(description="wellness | pharmacogenomic")
+    trait: str
+    genotype: str = Field(description="Observed genotype, e.g. 'A/G'; '—' if not callable")
+    dosage: int | None = Field(default=None, description="Effect-allele copies (0/1/2)")
+    effect_allele: str
+    interpretation: str
+    note: str | None = None
+
+
+class TraitsReport(BaseModel):
+    total: int
+    traits: list[TraitResult]
+    note: str = (
+        "Single well-characterized SNPs — informational, not diagnostic. The HLA-B*57:01 entry "
+        "is a European-validated screening proxy (confirm with HLA typing before acting)."
+    )
+
+
+def traits(category: str | None = None) -> TraitsReport:
+    """Single-SNP trait/wellness results (and the HLA-B*57:01 proxy) from `locus traits`."""
+    with connect(read_only=True) as con:
+        exists = con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'traits'"
+        ).fetchone()[0]
+        if not exists:
+            return TraitsReport(total=0, traits=[])
+        where, params = "TRUE", []
+        if category:
+            where, params = "category = ?", [category]
+        rows = con.execute(
+            f"SELECT rsid, category, trait, genotype, dosage, effect_allele, interpretation, note "
+            f"FROM traits WHERE {where} ORDER BY category, trait", params
+        ).fetchall()
+    items = [TraitResult(rsid=r[0], category=r[1], trait=r[2], genotype=r[3], dosage=r[4],
+                         effect_allele=r[5], interpretation=r[6], note=r[7]) for r in rows]
+    return TraitsReport(total=len(items), traits=items)
 
 
 def overview() -> dict:

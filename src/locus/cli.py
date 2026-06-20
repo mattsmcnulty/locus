@@ -187,6 +187,15 @@ def ancestry() -> None:
 
 
 @app.command()
+def traits() -> None:
+    """Genotype single-SNP traits/wellness (and the HLA-B*57:01 proxy) into the database."""
+    from . import traits as _traits
+
+    settings.ensure_dirs()
+    _traits.run()
+
+
+@app.command()
 def pipeline(
     normalize: bool = typer.Option(True, help="Normalize during ingest."),
     steps: str = typer.Option("all", help="Annotation steps to run."),

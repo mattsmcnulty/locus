@@ -7,12 +7,13 @@ import {
   type PgsResult,
   type PgxResult,
   type SqlResult,
+  type TraitsReport,
   type Variant,
   type VariantPage,
   type WhatsNew,
 } from "./api";
 
-type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "changelog" | "sql";
+type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "traits" | "changelog" | "sql";
 
 export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -36,7 +37,7 @@ export function App() {
       {overview && <OverviewBar o={overview} />}
 
       <nav className="tabs">
-        {(["search", "clinical", "pgx", "ancestry", "risk", "changelog", "sql"] as Tab[]).map((t) => (
+        {(["search", "clinical", "pgx", "ancestry", "risk", "traits", "changelog", "sql"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
             {t === "pgx" ? "Pharmacogenomics" : t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -49,6 +50,7 @@ export function App() {
         {tab === "pgx" && <PgxView />}
         {tab === "ancestry" && <AncestryView />}
         {tab === "risk" && <RiskView />}
+        {tab === "traits" && <TraitsView />}
         {tab === "changelog" && <ChangelogView />}
         {tab === "sql" && <SqlView />}
       </main>
@@ -288,6 +290,52 @@ function RiskView() {
         they're research-grade estimates, not diagnoses, and absolute risk across ancestries is unreliable.
         Coverage shows the fraction of each score's variants callable in your genome.
       </p>
+    </section>
+  );
+}
+
+function TraitsView() {
+  const traits = useAsync<TraitsReport>();
+  const acmg = useAsync<VariantPage>();
+  useEffect(() => {
+    traits.run(() => api.traits());
+    acmg.run(() => api.secondaryFindings());
+  }, []);
+  return (
+    <section>
+      <h3>ACMG secondary findings</h3>
+      {acmg.loading && <p>Loading…</p>}
+      {acmg.error && <div className="banner error">{acmg.error}</div>}
+      {acmg.data && acmg.data.total === 0 && (
+        <p className="hint">None — no pathogenic/likely-pathogenic variants in the ACMG SF v3.2
+          actionable genes. A reassuring result (confirm clinically if ever flagged).</p>
+      )}
+      {acmg.data && acmg.data.total > 0 && <VariantTable page={acmg.data} clinical />}
+
+      <h3 style={{ marginTop: "1.5rem" }}>Traits & wellness</h3>
+      {traits.loading && <p>Loading…</p>}
+      {traits.error && <div className="banner error">{traits.error}</div>}
+      {traits.data && traits.data.total === 0 && (
+        <p className="hint">No traits computed yet. Run <code>locus traits</code>.</p>
+      )}
+      {traits.data && traits.data.total > 0 && (
+        <table>
+          <thead>
+            <tr><th>Trait</th><th>Genotype</th><th>Interpretation</th><th>rsID</th></tr>
+          </thead>
+          <tbody>
+            {traits.data.traits.map((t) => (
+              <tr key={t.rsid}>
+                <td>{t.trait}{t.category === "pharmacogenomic" ? " ⚕" : ""}</td>
+                <td className="mono">{t.genotype}</td>
+                <td>{t.interpretation}</td>
+                <td>{t.rsid}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {traits.data && traits.data.total > 0 && <p className="hint">{traits.data.note}</p>}
     </section>
   );
 }

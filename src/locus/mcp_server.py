@@ -117,6 +117,28 @@ def predicted_damaging(gene: str = "", limit: int = 100) -> queries.VariantPage:
 
 
 @mcp.tool()
+def secondary_findings(limit: int = 100) -> queries.VariantPage:
+    """ACMG SF v3.2 secondary (incidental) findings: pathogenic / likely-pathogenic ClinVar variants
+    in the ~81 medically-actionable genes ACMG recommends reporting (cancer, cardiac, metabolic).
+    Empty is the common, reassuring result. Always confirm any hit clinically."""
+    err = _require_db()
+    if err:
+        return queries.VariantPage(total=0, limit=limit, offset=0, hits=[])
+    return queries.secondary_findings(limit=limit)
+
+
+@mcp.tool()
+def traits(category: str = "") -> queries.TraitsReport:
+    """Single-SNP traits/wellness (lactose, caffeine, alcohol flush, earwax, eye color, muscle type)
+    plus the HLA-B*57:01 abacavir-hypersensitivity screening proxy. Filter by `category`
+    ('wellness'|'pharmacogenomic'). Informational, not diagnostic. Requires `locus traits` to have run."""
+    err = _require_db()
+    if err:
+        return queries.TraitsReport(total=0, traits=[])
+    return queries.traits(category=category or None)
+
+
+@mcp.tool()
 def ancestry() -> queries.AncestrySummary:
     """Estimated biogeographic ancestry: continental proportions (k-NN over 1000 Genomes) and the
     PCA placement. Continental ancestry is reliable; finer/admixed breakdowns are approximate.

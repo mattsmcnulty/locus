@@ -69,6 +69,7 @@ export interface PcaPoint {
   pc1: number;
   pc2: number;
   is_sample: boolean;
+  group: string | null;
 }
 export interface AncestrySummary {
   components: AncestryComponent[];

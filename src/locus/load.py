@@ -162,7 +162,7 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             level VARCHAR, code VARCHAR, name VARCHAR, proportion DOUBLE
         );
         CREATE TABLE IF NOT EXISTS ancestry_pca(
-            label VARCHAR, pc1 DOUBLE, pc2 DOUBLE, is_sample BOOLEAN
+            label VARCHAR, pc1 DOUBLE, pc2 DOUBLE, is_sample BOOLEAN, "group" VARCHAR
         );
         CREATE TABLE IF NOT EXISTS pgs_scores(
             pgs_id VARCHAR, trait VARCHAR, raw DOUBLE, percentile DOUBLE,
@@ -222,10 +222,16 @@ def write_ancestry(ancestry_result, pgs_scores: list) -> None:
             rows += [("population", pop, POPULATIONS.get(pop, pop), frac)
                      for pop, frac in ancestry_result.populations.items() if frac > 0]
             con.executemany("INSERT INTO ancestry_global VALUES (?,?,?,?)", rows)
-            rows = [("you", ancestry_result.sample_pcs[0], ancestry_result.sample_pcs[1], True)]
-            for sp, (p1, p2) in ancestry_result.ref_centroids.items():
-                rows.append((sp, p1, p2, False))
-            con.executemany("INSERT INTO ancestry_pca VALUES (?,?,?,?)", rows)
+            # PCA scatter: the sample + the fine-population reference cloud (colored by
+            # continent via `group`). Falls back to superpop centroids if pop_points absent.
+            rows = [("you", ancestry_result.sample_pcs[0], ancestry_result.sample_pcs[1],
+                     True, ancestry_result.nearest)]
+            pop_points = getattr(ancestry_result, "pop_points", None)
+            if pop_points:
+                rows += [(label, p1, p2, False, sp) for label, p1, p2, sp in pop_points]
+            else:
+                rows += [(sp, p1, p2, False, sp) for sp, (p1, p2) in ancestry_result.ref_centroids.items()]
+            con.executemany("INSERT INTO ancestry_pca VALUES (?,?,?,?,?)", rows)
         if pgs_scores:
             con.executemany("INSERT INTO pgs_scores VALUES (?,?,?,?,?,?,?)", [
                 (s.pgs_id, s.trait, s.raw, s.percentile, s.ancestry, s.n_used, s.coverage)

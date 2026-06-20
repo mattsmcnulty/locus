@@ -330,6 +330,7 @@ class AncestryResult:
     nearest_population: str             # nearest fine population code
     sample_pcs: list[float]
     ref_centroids: dict[str, list[float]]  # superpop -> [PC1, PC2] for plotting
+    pop_points: list[list]                 # [population, PC1, PC2, superpop] per fine population
 
 
 def assign_ancestry(sample_pcs: np.ndarray, k: int = KNN_K) -> AncestryResult:
@@ -361,8 +362,15 @@ def assign_ancestry(sample_pcs: np.ndarray, k: int = KNN_K) -> AncestryResult:
         m = ref_sp == sp
         if m.any():
             centroids[sp] = [round(float(ref_pcs[m, 0].mean()), 4), round(float(ref_pcs[m, 1].mean()), 4)]
+    # Per-fine-population centroids — the dense, colored "world populations" cloud the SPA plots.
+    pop_points: list[list] = []
+    for pop in sorted({str(p) for p in ref_pop}):
+        m = ref_pop == pop
+        sp = str(ref_sp[m][0]) if m.any() else "NA"
+        pop_points.append([pop, round(float(ref_pcs[m, 0].mean()), 4),
+                           round(float(ref_pcs[m, 1].mean()), 4), sp])
     return AncestryResult(proportions, populations, nearest, nearest_pop,
-                          [round(float(x), 4) for x in sample_pcs], centroids)
+                          [round(float(x), 4) for x in sample_pcs], centroids, pop_points)
 
 
 def run() -> AncestryResult:

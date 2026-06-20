@@ -274,6 +274,7 @@ class PcaPoint(BaseModel):
     pc1: float
     pc2: float
     is_sample: bool
+    group: str | None = Field(default=None, description="Superpopulation, for coloring")
 
 
 class AncestrySummary(BaseModel):
@@ -307,11 +308,11 @@ def ancestry() -> AncestrySummary:
             "SELECT code, name, proportion FROM ancestry_global WHERE level='population' "
             "ORDER BY proportion DESC"
         ).fetchall()
-        pca = con.execute("SELECT label, pc1, pc2, is_sample FROM ancestry_pca").fetchall()
+        pca = con.execute('SELECT label, pc1, pc2, is_sample, "group" FROM ancestry_pca').fetchall()
     return AncestrySummary(
         components=[AncestryComponent(code=c[0], name=c[1], proportion=c[2]) for c in cont],
         populations=[AncestryComponent(code=c[0], name=c[1], proportion=c[2]) for c in pops],
-        pca=[PcaPoint(label=p[0], pc1=p[1], pc2=p[2], is_sample=p[3]) for p in pca],
+        pca=[PcaPoint(label=p[0], pc1=p[1], pc2=p[2], is_sample=p[3], group=p[4]) for p in pca],
     )
 
 

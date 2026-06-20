@@ -16,6 +16,16 @@ import {
 
 type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "traits" | "gwas" | "changelog" | "sql";
 
+// Continental colors for the ancestry PCA cloud.
+const SUPERPOP_COLORS: Record<string, string> = {
+  EUR: "#4ea1ff", AFR: "#ffcc4e", EAS: "#7c6cff", SAS: "#4ecb8b", AMR: "#ff8a4e",
+  MID: "#e36bd0", OCE: "#2fd0c7",
+};
+const SUPERPOP_NAMES: Record<string, string> = {
+  EUR: "European", AFR: "African", EAS: "East Asian", SAS: "South Asian", AMR: "American",
+  MID: "Middle Eastern", OCE: "Oceanian",
+};
+
 export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -247,19 +257,28 @@ function AncestryView() {
       <h3>Where you fall among world populations (PC1 × PC2)</h3>
       <svg width={W} height={H} className="pca">
         {pts.filter((p) => !p.is_sample).map((p) => (
-          <g key={p.label}>
-            <circle cx={sx(p.pc1)} cy={sy(p.pc2)} r={5} className="pca-ref" />
-            <text x={sx(p.pc1) + 7} y={sy(p.pc2) + 3} className="pca-lbl">{p.label}</text>
-          </g>
+          <circle key={p.label} cx={sx(p.pc1)} cy={sy(p.pc2)} r={5}
+            fill={SUPERPOP_COLORS[p.group ?? ""] ?? "#8b92a7"} opacity={0.75}>
+            <title>{p.label} ({p.group})</title>
+          </circle>
         ))}
         {pts.filter((p) => p.is_sample).map((p) => (
           <g key="you">
-            <circle cx={sx(p.pc1)} cy={sy(p.pc2)} r={6} className="pca-you" />
-            <text x={sx(p.pc1) + 8} y={sy(p.pc2) + 3} className="pca-lbl you">you</text>
+            <circle cx={sx(p.pc1)} cy={sy(p.pc2)} r={7} className="pca-you" />
+            <text x={sx(p.pc1) + 9} y={sy(p.pc2) + 4} className="pca-lbl you">you</text>
           </g>
         ))}
       </svg>
-      <p className="hint">{data.note}</p>
+      <div className="pca-legend">
+        {Object.entries(SUPERPOP_COLORS).map(([code, color]) => (
+          <span key={code} className="legend-item">
+            <span className="legend-dot" style={{ background: color }} /> {SUPERPOP_NAMES[code] ?? code}
+          </span>
+        ))}
+        <span className="legend-item"><span className="legend-dot" style={{ background: "var(--path)" }} /> you</span>
+      </div>
+      <p className="hint">Each dot is a reference population (1000 Genomes + HGDP), colored by continent;
+        your genome (★ red) sits among them. {data.note}</p>
     </section>
   );
 }

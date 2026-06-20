@@ -95,6 +95,12 @@ def pgs():
     return queries.polygenic_risk()
 
 
+@app.get("/api/painting")
+def painting():
+    _guard_db()
+    return queries.ancestry_painting()
+
+
 class SqlBody(BaseModel):
     query: str
 

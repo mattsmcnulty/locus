@@ -167,7 +167,27 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             pgs_id VARCHAR, trait VARCHAR, raw DOUBLE, percentile DOUBLE,
             ancestry VARCHAR, n_used INTEGER, coverage DOUBLE
         );
+        CREATE TABLE IF NOT EXISTS ancestry_segments(
+            haplotype INTEGER, chrom VARCHAR, start BIGINT, "end" BIGINT,
+            ancestry VARCHAR, posterior DOUBLE
+        );
     """)
+
+
+def write_segments(segments: list) -> None:
+    """Write local-ancestry segments (chromosome painting) into the DuckDB store."""
+    import duckdb as _d
+
+    from .config import settings
+
+    con = _d.connect(str(settings.db_path))
+    try:
+        _create_schema(con)
+        con.execute("DELETE FROM ancestry_segments")
+        if segments:
+            con.executemany("INSERT INTO ancestry_segments VALUES (?,?,?,?,?,?)", segments)
+    finally:
+        con.close()
 
 
 def write_ancestry(ancestry_result, pgs_scores: list) -> None:

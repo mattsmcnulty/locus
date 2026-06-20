@@ -285,6 +285,30 @@ def ancestry() -> AncestrySummary:
     )
 
 
+class AncestrySegment(BaseModel):
+    haplotype: int
+    chrom: str
+    start: int
+    end: int
+    ancestry: str
+    posterior: float | None = None
+
+
+def ancestry_painting(chrom: str | None = None) -> list[AncestrySegment]:
+    """Local-ancestry segments (chromosome painting). Optionally restrict to one chromosome."""
+    where, params = ("TRUE", [])
+    if chrom:
+        c = chrom if chrom.startswith("chr") else f"chr{chrom}"
+        where, params = ("chrom = ?", [c])
+    with connect(read_only=True) as con:
+        rows = con.execute(
+            f'SELECT haplotype, chrom, start, "end", ancestry, posterior '
+            f"FROM ancestry_segments WHERE {where} ORDER BY chrom, start", params
+        ).fetchall()
+    return [AncestrySegment(haplotype=r[0], chrom=r[1], start=r[2], end=r[3], ancestry=r[4], posterior=r[5])
+            for r in rows]
+
+
 def polygenic_risk() -> list[PgsResult]:
     with connect(read_only=True) as con:
         rows = con.execute(

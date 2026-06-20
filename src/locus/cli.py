@@ -185,6 +185,18 @@ def ancestry() -> None:
 
 
 @app.command()
+def painting(
+    chroms: str = typer.Option("", help="Comma list of chromosomes (default: all autosomes). Heavy/slow."),
+) -> None:
+    """Local-ancestry chromosome painting (Gnomix). Heavy — see localancestry.py docs."""
+    from . import localancestry
+
+    settings.ensure_dirs()
+    targets = [c.strip() for c in chroms.split(",")] if chroms else None
+    localancestry.run(targets)
+
+
+@app.command()
 def pipeline(
     normalize: bool = typer.Option(True, help="Normalize during ingest."),
     steps: str = typer.Option("all", help="Annotation steps to run."),

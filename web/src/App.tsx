@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   api,
+  type AncestrySegment,
   type AncestrySummary,
   classifyQuery,
   type Overview,
@@ -11,7 +12,7 @@ import {
   type VariantPage,
 } from "./api";
 
-type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "sql";
+type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "painting" | "sql";
 
 export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -35,7 +36,7 @@ export function App() {
       {overview && <OverviewBar o={overview} />}
 
       <nav className="tabs">
-        {(["search", "clinical", "pgx", "ancestry", "risk", "sql"] as Tab[]).map((t) => (
+        {(["search", "clinical", "pgx", "ancestry", "risk", "painting", "sql"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
             {t === "pgx" ? "Pharmacogenomics" : t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -48,6 +49,7 @@ export function App() {
         {tab === "pgx" && <PgxView />}
         {tab === "ancestry" && <AncestryView />}
         {tab === "risk" && <RiskView />}
+        {tab === "painting" && <PaintingView />}
         {tab === "sql" && <SqlView />}
       </main>
 
@@ -280,6 +282,71 @@ function RiskView() {
       </p>
     </section>
   );
+}
+
+const ANC_COLORS: Record<string, string> = {
+  EUR: "#7c6cff", AFR: "#ff8c42", EAS: "#4ea1ff", SAS: "#46c98b", AMR: "#ff5d73",
+};
+function ancColor(a: string): string {
+  const key = Object.keys(ANC_COLORS).find((k) => a.toUpperCase().includes(k));
+  return key ? ANC_COLORS[key] : "#8b92a7";
+}
+
+function PaintingView() {
+  const { data, loading, error, run } = useAsync<AncestrySegment[]>();
+  useEffect(() => {
+    run(() => api.painting());
+  }, []);
+  if (loading) return <p>Loading…</p>;
+  if (error) return <div className="banner error">{error}</div>;
+  if (!data || data.length === 0)
+    return (
+      <p className="hint">
+        No chromosome painting yet. Run <code>locus download localancestry</code> then{" "}
+        <code>locus painting</code> (heavy: per-chromosome Gnomix on the GRCh38 panel). Note: for a
+        non-admixed genome the painting is essentially one colour throughout.
+      </p>
+    );
+
+  const chroms = [...new Set(data.map((s) => s.chrom))].sort(
+    (a, b) => (parseInt(a.replace("chr", "")) || 99) - (parseInt(b.replace("chr", "")) || 99),
+  );
+  const maxEnd = Math.max(...data.map((s) => s.end));
+  const W = 760, rowH = 16, gap = 10, labelW = 44;
+  const ancestries = [...new Set(data.map((s) => ancColorKey(s.ancestry)))];
+  return (
+    <section>
+      <h3>Chromosome painting (local ancestry)</h3>
+      <div className="legend">
+        {ancestries.map((a) => (
+          <span key={a}><span className="swatch" style={{ background: ancColor(a) }} /> {a}</span>
+        ))}
+      </div>
+      <svg width={W} height={chroms.length * (rowH + gap)}>
+        {chroms.map((chrom, i) => {
+          const segs = data.filter((s) => s.chrom === chrom && s.haplotype === 0);
+          const y = i * (rowH + gap);
+          const scale = (W - labelW - 10) / maxEnd;
+          return (
+            <g key={chrom}>
+              <text x={0} y={y + rowH - 3} className="pca-lbl">{chrom}</text>
+              {segs.map((s, j) => (
+                <rect key={j} x={labelW + s.start * scale} y={y}
+                  width={Math.max(1, (s.end - s.start) * scale)} height={rowH}
+                  fill={ancColor(s.ancestry)} opacity={s.posterior != null ? Math.max(0.4, s.posterior) : 0.9} />
+              ))}
+            </g>
+          );
+        })}
+      </svg>
+      <p className="hint">Each bar is a chromosome; colours are the inferred ancestry of each segment (haplotype 1).</p>
+    </section>
+  );
+}
+
+function ancColorKey(a: string): string {
+  const key = Object.keys(ANC_COLORS).find((k) => a.toUpperCase().includes(k));
+  return key || a;
 }
 
 function SqlView() {

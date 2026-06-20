@@ -75,6 +75,14 @@ export interface AncestrySummary {
   pca: PcaPoint[];
   note: string;
 }
+export interface AncestrySegment {
+  haplotype: number;
+  chrom: string;
+  start: number;
+  end: number;
+  ancestry: string;
+  posterior: number | null;
+}
 export interface PgsResult {
   pgs_id: string;
   trait: string;
@@ -102,6 +110,7 @@ export const api = {
     get<PgxResult>(`/api/pgx?gene=${encodeURIComponent(gene)}&drug=${encodeURIComponent(drug)}`),
   ancestry: () => get<AncestrySummary>("/api/ancestry"),
   pgs: () => get<PgsResult[]>("/api/pgs"),
+  painting: () => get<AncestrySegment[]>("/api/painting"),
   sql: async (query: string): Promise<SqlResult> => {
     const r = await fetch("/api/sql", {
       method: "POST",

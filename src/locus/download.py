@@ -206,6 +206,40 @@ def setup_ancestry() -> None:
     console.print("[green]Ancestry toolchain + panel ready.[/]")
 
 
+GENETIC_MAPS_URL = "https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/plink.GRCh38.map.zip"
+ZENODO_PANEL_RECORD = "18156285"  # HGDP+1KG GRCh38 phased panel for local ancestry (~11 GB)
+
+
+def setup_localancestry() -> None:
+    """Resources for Phase 3 chromosome painting: Gnomix, GRCh38 genetic maps, HGDP+1KG phased panel.
+
+    Large (~11 GB panel). The painting is only informative for admixed genomes; check
+    `locus ancestry` first. See localancestry.py for the build/runtime caveats.
+    """
+    import httpx
+
+    la = settings.annotations_dir / "localancestry"
+    la.mkdir(parents=True, exist_ok=True)
+    if not (la / "gnomix" / "gnomix.py").exists():
+        console.print("[bold]Cloning Gnomix…[/]")
+        shell.run(["git", "clone", "--depth", "1", "https://github.com/AI-sandbox/gnomix.git", str(la / "gnomix")])
+    if not (la / "maps").exists():
+        console.print("[bold]Downloading GRCh38 genetic maps…[/]")
+        _curl(GENETIC_MAPS_URL, la / "maps.zip")
+        shell.run(["unzip", "-o", "-q", str(la / "maps.zip"), "-d", str(la / "maps")])
+        (la / "maps.zip").unlink(missing_ok=True)
+    panel = la / "panel"
+    panel.mkdir(exist_ok=True)
+    rec = httpx.get(f"https://zenodo.org/api/records/{ZENODO_PANEL_RECORD}", timeout=60).json()
+    files = {f["key"]: f["links"]["self"] for f in rec["files"]}
+    console.print(f"[bold]Downloading HGDP+1KG GRCh38 phased panel ({len(files)} files, ~11 GB)…[/]")
+    for key, url in files.items():
+        dest = panel / key
+        if not dest.exists():
+            _curl(url, dest)
+    console.print("[green]Local-ancestry resources ready.[/] Build a sample map, then `locus painting`.")
+
+
 # Targets that require an explicit, deliberate opt-in (very large).
 def guidance_large() -> None:
     console.print(
@@ -223,6 +257,7 @@ TARGETS = {
     "pharmcat": setup_pharmcat,
     "ancestry": setup_ancestry,
     "alphamissense": setup_alphamissense,
+    "localancestry": setup_localancestry,
 }
 
 

@@ -1,0 +1,51 @@
+[project]
+name = "locus"
+version = "0.1.0"
+description = "Explore your genome locally with Claude"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cyvcf2>=0.31",       # fast VCF parsing (htslib-backed)
+    "duckdb>=1.1",        # local columnar query store
+    "pyarrow>=17",        # cyvcf2 -> Arrow -> DuckDB bridge
+    "fastapi>=0.115",     # SPA backend
+    "uvicorn[standard]>=0.32",
+    "mcp>=1.2",           # Model Context Protocol SDK (FastMCP)
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "typer>=0.15",        # CLI
+    "rich>=13.9",         # pretty CLI output
+    "httpx>=0.27",        # optional API-based annotation fallbacks
+]
+
+[project.optional-dependencies]
+# PharmCAT's VCF preprocessor deps (installed by `locus download pharmcat`).
+pgx = ["colorama>=0.4.6", "pandas>=2.1.3", "packaging~=24.1"]
+
+[project.scripts]
+locus = "locus.cli:app"
+locus-mcp = "locus.mcp_server:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "pytest>=8.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/locus"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer uses function calls (Option/Argument) as argument defaults by design.
+"src/locus/cli.py" = ["B008"]

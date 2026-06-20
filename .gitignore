@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PRIVACY: this repo must NEVER contain personal genetic data or large DBs.
+# The entire data/ tree (genome, reference, annotation DBs, reports, the DuckDB
+# store) is ignored. If you add new data locations, ignore them too.
+# ─────────────────────────────────────────────────────────────────────────────
+data/
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.gz.csi
+*.bcf
+*.gvcf
+*.gvcf.gz
+*.fq
+*.fq.gz
+*.fastq
+*.fastq.gz
+*.bam
+*.bam.bai
+*.cram
+*.cram.crai
+*.fa
+*.fa.gz
+*.fasta
+*.fai
+*.duckdb
+*.duckdb.wal
+*.db
+reports/
+
+# Secrets / local config
+.env
+.env.local
+
+# Python (uv)
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Node / Vite (web SPA)
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo
+node_modules/
+
+# Tools / caches
+.DS_Store
+*.log
+pharmcat*.jar
+snpEff*.jar
+*.jar

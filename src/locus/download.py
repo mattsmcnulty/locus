@@ -152,6 +152,10 @@ PANEL_PSAM_URL = (
     "https://www.dropbox.com/scl/fi/u5udzzaibgyvxzfnjcvjc/hg38_corrected.psam"
     "?rlkey=oecjnk4vmbhc8b1p202l0ih4x&dl=1"
 )
+# HGDP (GRCh38) — projected onto the 1000G PC space for finer within-Europe resolution.
+HGDP_PGEN_URL = "https://www.dropbox.com/s/hppj1g1gzygcocq/hgdp_all.pgen.zst?dl=1"
+HGDP_PVAR_URL = "https://www.dropbox.com/s/1mmkq0bd9ax8rng/hgdp_all.pvar.zst?dl=1"
+HGDP_PSAM_URL = "https://www.dropbox.com/s/0zg57558fqpj3w1/hgdp.psam?dl=1"
 
 
 ALPHAMISSENSE_URL = "https://zenodo.org/records/8208688/files/AlphaMissense_hg38.tsv.gz?download=1"
@@ -203,7 +207,19 @@ def setup_ancestry() -> None:
         console.print("Decompressing pgen…")
         shell.run(["zstd", "-d", "-f", str(zst), "-o", str(pgen)])
         zst.unlink(missing_ok=True)
-    console.print("[green]Ancestry toolchain + panel ready.[/]")
+    # HGDP — projected in for finer within-Europe resolution (French/Orcadian/Basque/…).
+    hgdp = anc / "hgdp"
+    hgdp.mkdir(exist_ok=True)
+    hpgen = hgdp / "hgdp_all.pgen"
+    if not hpgen.exists():
+        _curl(HGDP_PSAM_URL, hgdp / "hgdp.psam")
+        _curl(HGDP_PVAR_URL, hgdp / "hgdp_all.pvar.zst")
+        console.print("[bold]Downloading HGDP panel (~2.3 GB)…[/]")
+        hzst = hgdp / "hgdp_all.pgen.zst"
+        _curl(HGDP_PGEN_URL, hzst)
+        shell.run(["zstd", "-d", "-f", str(hzst), "-o", str(hpgen)])
+        hzst.unlink(missing_ok=True)
+    console.print("[green]Ancestry toolchain + 1000G + HGDP panels ready.[/]")
 
 
 # Targets that require an explicit, deliberate opt-in (very large).

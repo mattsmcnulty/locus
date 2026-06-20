@@ -52,6 +52,16 @@ POPULATIONS = {
     "ESN": "Esan (Nigeria)", "ASW": "African-American (SW US)", "ACB": "African-Caribbean (Barbados)",
     # AMR
     "MXL": "Mexican-American", "PUR": "Puerto Rican", "CLM": "Colombian", "PEL": "Peruvian",
+    # HGDP European groups (projected in for finer within-Europe resolution)
+    "French": "French", "Orcadian": "Orcadian (Orkney, Scotland)", "Basque": "Basque (Spain/France)",
+    "Sardinian": "Sardinian", "BergamoItalian": "Bergamo Italian", "Tuscan": "Tuscan (HGDP)",
+    "Russian": "Russian", "Adygei": "Adygei (Caucasus)",
+}
+
+# HGDP region -> 1000G-style superpopulation (for the continental rollup).
+HGDP_REGION_SUPERPOP = {
+    "EUROPE": "EUR", "EAST_ASIA": "EAS", "AFRICA": "AFR", "AMERICA": "AMR",
+    "CENTRAL_SOUTH_ASIA": "SAS", "MIDDLE_EAST": "MID", "OCEANIA": "OCE",
 }
 N_PCS = 10
 KNN_K = 50  # nearest reference neighbours for the fine-population breakdown
@@ -183,6 +193,51 @@ def _cache_reference_pcs(md: Path) -> None:
              superpop=np.array(sps), population=np.array(pops))
 
 
+def add_hgdp_reference() -> int:
+    """Project HGDP samples onto the 1000G PC space and append them to the cached reference.
+
+    No panel merge: HGDP is projected with the same allele weights as the 1000G reference, then
+    appended to ref_pcs.npz so the k-NN sees finer European populations (French, Orcadian, Basque…).
+    Idempotent (guarded by a marker file).
+    """
+    md = _model_dir()
+    if (md / "hgdp_added").exists():
+        return 0
+    hgdp = _ancestry_dir() / "hgdp"
+    pgen, pvar, psam = hgdp / "hgdp_all.pgen", hgdp / "hgdp_all.pvar.zst", hgdp / "hgdp.psam"
+    if not pgen.exists():
+        console.print("[yellow]HGDP not present — skipping (download hgdp_all.pgen first).[/]")
+        return 0
+    out = settings.work_dir / "hgdp_proj"
+    console.print("Projecting HGDP onto the 1000G PC space…")
+    shell.run([str(plink2()), "--pgen", str(pgen), "--pvar", str(pvar), "--psam", str(psam),
+               "--max-alleles", "2", "--snps-only", "--set-all-var-ids", "@:#", "--rm-dup", "exclude-all",
+               "--extract", str(md / "prune.prune.in"), "--read-freq", str(md / "pca.afreq"),
+               "--score", str(md / "pca.eigenvec.allele"), "2", "5", "header-read", "variance-standardize",
+               "--score-col-nums", f"6-{6 + N_PCS - 1}", "--out", str(out)])
+    iids, pcs, _, _ = _parse_sscore_pcs(Path(str(out) + ".sscore"))
+    # Join population + region from the HGDP psam (IID is column 0).
+    pop_of, region_of = {}, {}
+    with open(psam) as fh:
+        h = next(fh).lstrip("#").rstrip("\n").split("\t")
+        ip, ir = h.index("population"), h.index("region")
+        for line in fh:
+            c = line.rstrip("\n").split("\t")
+            pop_of[c[0]], region_of[c[0]] = c[ip], c[ir]
+    pops = [pop_of.get(i, "NA") for i in iids]
+    sps = [HGDP_REGION_SUPERPOP.get(region_of.get(i, ""), "NA") for i in iids]
+
+    data = np.load(md / "ref_pcs.npz", allow_pickle=True)
+    np.savez(md / "ref_pcs.npz",
+             iids=np.concatenate([data["iids"], np.array(iids)]),
+             pcs=np.concatenate([data["pcs"], pcs]),
+             superpop=np.concatenate([data["superpop"], np.array(sps)]),
+             population=np.concatenate([data["population"], np.array(pops)]))
+    (md / "hgdp_added").write_text("1")
+    console.print(f"[green]Added {len(iids)} HGDP reference samples[/] (finer European resolution).")
+    return len(iids)
+
+
 def pruned_sites() -> list[tuple[str, int, str, str]]:
     """(chrom[non-chr], pos, ref, alt) for the pruned panel SNPs."""
     pvar = _model_dir() / "panel_pruned.pvar"
@@ -311,8 +366,9 @@ def assign_ancestry(sample_pcs: np.ndarray, k: int = KNN_K) -> AncestryResult:
 
 
 def run() -> AncestryResult:
-    """End-to-end ancestry: build model (cached), harmonize + project the sample, assign."""
+    """End-to-end ancestry: build model (cached), add HGDP if present, project the sample, assign."""
     build_reference_model()
+    add_hgdp_reference()  # finer European resolution if HGDP was downloaded
     console.rule("[bold]Ancestry")
     harmonized = harmonize_sample(settings.work_dir / "ancestry.harmonized.vcf.gz")
     pcs = project_sample(harmonized)

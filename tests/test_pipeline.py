@@ -193,31 +193,33 @@ def test_mcp_stdio_tools_respond(genome):
     env = {**os.environ, "LOCUS_DATA_DIR": str(genome)}
     params = StdioServerParameters(command=sys.executable, args=["-m", "locus.mcp_server"], env=env)
 
-    def _result_list(call_result):
-        sc = call_result.structuredContent
-        if isinstance(sc, dict) and "result" in sc:
-            return sc["result"]
-        return sc
-
     async def _run():
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await asyncio.wait_for(session.initialize(), timeout=30)
                 tools = await asyncio.wait_for(session.list_tools(), timeout=30)
-                names = {t.name for t in tools.tools}
-                assert {"structural_variants", "polygenic_risk", "genome_overview"} <= names
+                by_name = {t.name: t for t in tools.tools}
+                assert {"structural_variants", "polygenic_risk", "genome_overview"} <= set(by_name)
+
+                # These two must expose a named object output schema, NOT FastMCP's
+                # generic {"result": [...]} list wrapper, which strict clients won't
+                # dispatch a call against (the original hang).
+                assert set(by_name["structural_variants"].outputSchema["properties"]) == {"total", "hits"}
+                assert list(by_name["polygenic_risk"].outputSchema["properties"]) == ["scores"]
 
                 # The handler that was effectively broken: must return >0 hits now.
                 sv = await asyncio.wait_for(
                     session.call_tool("structural_variants", {"region": "chr21:1-60"}), timeout=30
                 )
                 assert not sv.isError
-                assert len(_result_list(sv)) >= 2
+                assert sv.structuredContent["total"] >= 2
+                assert len(sv.structuredContent["hits"]) >= 2
 
                 # Must respond promptly without hanging (empty is fine on the fixture,
                 # which has no ancestry/PGS step).
                 pr = await asyncio.wait_for(session.call_tool("polygenic_risk", {}), timeout=30)
                 assert not pr.isError
+                assert isinstance(pr.structuredContent["scores"], list)
 
     asyncio.run(_run())
 

@@ -13,11 +13,26 @@ Register with Claude Code:
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field
 
 from . import queries
 from .db import db_exists
 
 mcp = FastMCP("locus")
+
+
+# Tools must return an object-typed structured output. A bare ``list[...]`` makes
+# FastMCP emit a generic ``{"result": [...]}`` wrapper schema that strict MCP
+# clients (e.g. Claude Desktop) refuse to dispatch a call against — the request
+# never even reaches the server. Wrap list returns in a named model so the output
+# schema matches the working tools (like VariantPage).
+class PolygenicRiskReport(BaseModel):
+    scores: list[queries.PgsResult] = Field(description="One entry per curated polygenic score")
+
+
+class StructuralVariantsResult(BaseModel):
+    total: int = Field(description="Number of CNV/SV records overlapping the region")
+    hits: list[queries.StructuralHit]
 
 
 def _require_db() -> str | None:
@@ -83,10 +98,11 @@ def allele_frequency(region: str) -> queries.VariantPage:
 
 
 @mcp.tool()
-def structural_variants(region: str, limit: int = 100) -> list[queries.StructuralHit]:
+def structural_variants(region: str, limit: int = 100) -> StructuralVariantsResult:
     """Copy-number (CNV) and structural (SV) events overlapping a region ('chr1:1000000-2000000').
     For CNVs, `cn` is the estimated copy number (2 = normal diploid)."""
-    return queries.structural_overlap(region, limit=limit)
+    hits = queries.structural_overlap(region, limit=limit)
+    return StructuralVariantsResult(total=len(hits), hits=hits)
 
 
 @mcp.tool()
@@ -112,14 +128,14 @@ def ancestry() -> queries.AncestrySummary:
 
 
 @mcp.tool()
-def polygenic_risk() -> list[queries.PgsResult]:
+def polygenic_risk() -> PolygenicRiskReport:
     """Polygenic (aggregate) risk scores for common traits (CAD, LDL, T2D, AFib, Lp(a)), reported as
     an ancestry-matched percentile where available. Percentiles are only meaningful within the matched
     ancestry; these are research-grade estimates, not diagnoses. Requires `locus ancestry` to have run."""
     err = _require_db()
     if err:
-        return {"error": err}  # type: ignore[return-value]
-    return queries.polygenic_risk()
+        return PolygenicRiskReport(scores=[])
+    return PolygenicRiskReport(scores=queries.polygenic_risk())
 
 
 @mcp.tool()

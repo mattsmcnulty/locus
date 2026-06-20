@@ -2,16 +2,19 @@
 
 **Explore your genome locally with Claude.**
 
-Locus takes the whole-genome sequencing files from [sequencing.com](https://sequencing.com)
-(Illumina DRAGEN output), annotates them with open-source clinical, population, and
-pharmacogenomic databases, loads everything into a fast local [DuckDB](https://duckdb.org)
-store, and exposes it two ways:
+Locus turns the whole-genome sequencing files from [sequencing.com](https://sequencing.com)
+(or any Illumina/DRAGEN-style VCFs) into a fast local [DuckDB](https://duckdb.org) store,
+annotates them with open-source clinical, population, and pharmacogenomic databases, layers
+on deeper interpretation (ancestry, polygenic risk, traits, GWAS), and keeps re-interpreting
+your genome as new studies are published — all on your machine. It's exposed two ways:
 
 1. **An MCP server** so you can ask **Claude** questions about your genome in plain English.
 2. **A local debug SPA** (React) for browsing and visualizing the same data.
 
 > ⚠️ **This is sensitive personal genetic data.** Everything under `data/` is `.gitignore`d
-> and never committed. The MCP server and the SPA bind to **localhost only**.
+> and never committed. The MCP server and the SPA bind to **localhost only**, and the refresh
+> engine sends only *generic* queries outward (release dates, public score IDs, rsID lists) —
+> your genome never leaves the machine.
 
 ---
 
@@ -27,23 +30,43 @@ The sequencing.com / DRAGEN bundle:
 | `*.1.fq.gz` / `*.2.fq.gz` | Raw paired-end reads (optional; not needed to query) |
 
 The variants are already **called**, so the VCFs are the queryable layer — Locus does not
-re-process the raw reads.
+re-process the raw reads. (Read-level analyses like repeat expansions or CNV-aware CYP2D6 would
+need the BAM/CRAM and are not yet implemented.)
+
+## What it can tell you
+
+| Area | Capability |
+| --- | --- |
+| **Clinical** | ClinVar pathogenic / likely-pathogenic variants you carry; **ACMG SF v3.2** secondary findings in the ~81 medically-actionable genes |
+| **Predicted impact** | **AlphaMissense** scores for missense variants ClinVar has never classified (the `clnsig = null ≠ benign` gap) |
+| **Pharmacogenomics** | **PharmCAT** star-allele diplotypes, metabolizer phenotypes, and CPIC/DPWG drug guidance |
+| **Ancestry** | Biogeographic ancestry via PCA + k-NN over 1000 Genomes + HGDP — continental and sub-continental |
+| **Polygenic risk** | PGS Catalog scores reported as an **ancestry-matched percentile** (CAD, LDL, T2D, Lp(a), …) |
+| **Traits & wellness** | Single-SNP traits (lactose, caffeine, alcohol flush, earwax, eye color, muscle type), the **HLA-B\*57:01** abacavir-hypersensitivity proxy, and your **mtDNA maternal haplogroup** |
+| **GWAS breadth** | Which genome-wide-significant (p<5e-8) risk alleles you carry, across the whole GWAS Catalog, queryable by trait |
+| **On-demand** | Paste a new paper's rsIDs and get your genotypes live (`ask_about`) |
+| **Living updates** | `locus refresh` re-interprets your genome as databases move — headlined by **ClinVar reanalysis** (variants you carry that were newly classified pathogenic) |
 
 ## Architecture
 
 ```
 sequencing.com VCFs
-      │  ingest    (index, QC, normalize — bcftools)
+      │  ingest    (index, QC, normalize, chr-canonicalize — bcftools)
       ▼
   normalized VCFs
-      │  annotate  (ClinVar · dbSNP · gnomAD · VEP/SnpEff · PharmCAT)
+      │  annotate  (ClinVar · gnomAD · SnpEff · AlphaMissense · PharmCAT — all native)
       ▼
  annotated variants
       │  load      (cyvcf2 → Arrow → DuckDB)
       ▼
-  locus.duckdb  ──►  MCP server   ──►  Claude
-              └──►  FastAPI       ──►  React SPA
+  locus.duckdb  ◄── ancestry/pgs · traits · gwas   (deeper interpretation; preserved across reloads)
+      │       ◄── refresh                          (re-interpret as ClinVar/PGS/CPIC publish)
+      ├──►  MCP server   ──►  Claude
+      └──►  FastAPI      ──►  React SPA
 ```
+
+Everything runs **natively on Apple Silicon — no Docker.** PLINK2 (arm64), bcftools/samtools,
+and the JVM tools (SnpEff, PharmCAT, Haplogrep2) all run directly.
 
 ## Quickstart
 
@@ -54,56 +77,106 @@ make tools
 # 2. Python env + deps
 make setup
 
-# 3. Put your sequencing.com VCFs in data/genome/ then check the environment
+# 3. Put your sequencing.com VCFs in data/genome/, then check the environment
 make doctor
 
-# 4. Download & prepare the open-source databases (reference, ClinVar, SnpEff, PharmCAT)
-uv run locus download all     # see `locus download --help` for individual targets
+# 4. Download & prepare the open-source databases (see the table below; `all` does the core set)
+uv run locus download all
 
 # 5. Build the local genome database (ingest → annotate → load)
-make pipeline
+make pipeline                # ~5M variants; a few minutes
 
-# 6a. Query with Claude — register the MCP server, then just ask Claude
-claude mcp add --scope project --transport stdio locus -- uv run locus-mcp
+# 6. Deeper interpretation (each is independent and preserved across variant reloads)
+uv run locus ancestry        # ancestry + ancestry-calibrated polygenic risk
+uv run locus traits          # single-SNP traits + HLA-B*57:01 proxy + mtDNA haplogroup
+uv run locus gwas            # GWAS Catalog risk alleles you carry
 
-# 6b. Or browse in the debug SPA
-make serve-api      # backend at http://127.0.0.1:8787
-make web-dev        # frontend dev server at http://localhost:5173
+# 7a. Query with Claude — register the MCP server (below), then just ask
+# 7b. Or browse the SPA
+uv run locus serve api       # http://127.0.0.1:8787  (serves the built SPA + the API)
+
+# 8. Keep it current — re-interpret as new studies publish
+uv run locus refresh --dry-run     # preview; then `locus refresh`, or schedule it weekly
 ```
 
-Before you have the real genome, you can exercise the whole pipeline on a tiny
-**synthetic** one (no downloads, no real data):
+Before you have the real genome, exercise the whole pipeline on a tiny **synthetic** one
+(no downloads, no real data):
 
 ```bash
 uv run python scripts/make_fixture.py /tmp/locus-fixture
-LOCUS_DATA_DIR=/tmp/locus-fixture uv run locus ingest && \
+LOCUS_DATA_DIR=/tmp/locus-fixture uv run locus ingest
 LOCUS_DATA_DIR=/tmp/locus-fixture uv run locus load
-LOCUS_DATA_DIR=/tmp/locus-fixture uv run locus serve api   # then open the SPA
+LOCUS_DATA_DIR=/tmp/locus-fixture uv run locus serve api
 ```
 
-### Annotation defaults (and why)
+## CLI reference
 
-- **Consequences:** default to **SnpEff** (pure-Java, runs natively on Apple Silicon). Ensembl
-  **VEP** is supported as the richer option but needs Docker on arm64 — see `docs/integration-notes.md`.
-- **gnomAD** allele frequencies are **streamed per-region** from the AWS mirror (no multi-hundred-GB
-  download). This runs during `locus annotate --steps gnomad` and can be slow over the network.
-- **dbSNP** is skipped by default — DRAGEN already fills rsIDs.
-- **PharmCAT** runs via the official `pgkb/pharmcat` Docker image (bundles the required VCF preprocessor).
+Run any command with `uv run locus <command>` (or activate the venv / add an alias — see below).
+`--help` works on every command and subcommand.
+
+| Command | What it does |
+| --- | --- |
+| `locus doctor` | Check the toolchain, databases, and input data are in place |
+| `locus download <target>` | Download & prepare a database (or `all`) — see targets below |
+| `locus ingest` | Index, QC, normalize the VCFs (gVCF → sites; canonicalize contigs to `chr*`) |
+| `locus annotate [--steps ...]` | Annotate variants. Steps: `clinvar,gnomad,snpeff,alphamissense,pharmcat` or `all` |
+| `locus load` | Build/refresh the DuckDB store (rebuilds variant tables; **preserves** ancestry/PGS/traits/GWAS/watch tables) |
+| `locus pipeline` | `ingest → annotate → load`, end to end |
+| `locus ancestry` | Biogeographic ancestry (PCA + k-NN over 1000G + HGDP) + ancestry-calibrated polygenic risk |
+| `locus traits` | Genotype single-SNP traits/wellness + HLA-B\*57:01 proxy + mtDNA haplogroup |
+| `locus gwas` | Genotype GWAS Catalog risk alleles (p<5e-8) and store the ones you carry |
+| `locus refresh [--dry-run] [--force] [--sources clinvar,pgs,cpic]` | Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis, new PGS, CPIC updates) |
+| `locus schedule install [--weekday N] [--hour H]` | Install a weekly macOS launchd job that runs `locus refresh` |
+| `locus schedule status` / `locus schedule uninstall` | Show / remove the scheduled job |
+| `locus serve mcp` | Start the MCP server (stdio) — what Claude connects to |
+| `locus serve api` | Start the FastAPI backend and serve the built SPA at `http://127.0.0.1:8787` |
+
+**Typical first run:** `download all` → `pipeline` → `ancestry` → `traits` → `gwas` → register MCP / `serve api` → `refresh` (and optionally `schedule install`).
+
+**Run `locus` from anywhere** (instead of `uv run locus …`): add a shell alias —
+
+```bash
+echo "alias locus='uv run --directory $(pwd) locus'" >> ~/.zshrc && source ~/.zshrc
+```
+
+### Download targets
+
+| Target | Contents | Approx size |
+| --- | --- | --- |
+| `reference` | GRCh38 no-alt analysis-set FASTA (bgzip + faidx) | ~900 MB |
+| `clinvar` | ClinVar GRCh38 VCF, chr-renamed | ~180 MB |
+| `snpeff` | SnpEff jar + GRCh38 database (consequences) | ~0.5 GB |
+| `pharmcat` | PharmCAT pipeline — native jar + Python preprocessor | ~30 MB |
+| `alphamissense` | AlphaMissense hg38 (slim, tabix-indexed) | ~640 MB |
+| `ancestry` | PLINK2 (arm64) + 1000 Genomes + HGDP reference panels | ~6 GB |
+| `haplogrep` | Haplogrep2 jar (mtDNA haplogroups) | ~7 MB |
+| `gwas` | NHGRI-EBI GWAS Catalog associations TSV | ~65 MB |
+
+`locus download all` fetches the core set; the larger optional ones (`ancestry`, `alphamissense`,
+`gwas`) can be fetched individually when you want those features.
 
 ## Querying with Claude (MCP)
 
-The MCP server exposes read-only tools over your genome:
+The MCP server exposes **read-only, typed** tools over your genome (object-typed output so strict
+clients dispatch them reliably):
 
-- `lookup_variant(gene | rsid | region)`
-- `clinical_findings(gene?, significance?)` — ClinVar pathogenic / likely-pathogenic
-- `pharmacogenomics(drug?, gene?)` — PharmCAT star alleles + CPIC guidance
-- `allele_frequency(variant)` — gnomAD population frequency
-- `gene_summary(gene)` — all variants in a gene with consequences
-- `cnv_sv_overlap(gene | region)` — structural / copy-number hits
-- `run_sql(query)` — guarded read-only SQL
+**Lookups** — `genome_overview`, `lookup_variant_by_rsid`, `lookup_variants_in_gene`,
+`lookup_variants_in_region`, `allele_frequency`, `run_sql` (guarded read-only SQL)
+**Clinical** — `clinical_findings` (ClinVar P/LP), `predicted_damaging` (rare AlphaMissense-pathogenic),
+`secondary_findings` (ACMG SF), `structural_variants` (CNV/SV)
+**Pharmacogenomics** — `pharmacogenomics` (PharmCAT diplotypes + CPIC/DPWG guidance)
+**Ancestry & risk** — `ancestry`, `polygenic_risk`
+**Traits & breadth** — `traits`, `gwas_associations`, `ask_about` (paste rsIDs or a trait)
+**Living updates** — `whats_new` (the ranked changelog from `locus refresh`)
 
-Then ask things like *"Do I carry any pathogenic ClinVar variants?"* or
-*"What's my CYP2C19 metabolizer status and which drugs does it affect?"*
+Then ask things like:
+- *"Do I carry any pathogenic ClinVar variants? Any ACMG secondary findings?"*
+- *"What's my CYP2C19 metabolizer status and which drugs does it affect?"*
+- *"What's my CAD polygenic risk percentile, and where do I fall in ancestry?"*
+- *"What's my mtDNA haplogroup? Am I lactose-persistent? Can I take abacavir?"*
+- *"What GWAS associations do I carry for type 2 diabetes?"*
+- *"Check rs429358 and rs7412"* (APOE) — or paste any rsIDs from a new paper.
+- *"What's new in my genome this month?"*
 
 ### Registering the MCP server
 
@@ -115,7 +188,7 @@ claude mcp add --scope project --transport stdio locus -- uv run --directory $(p
 
 **Claude Desktop (macOS)** — add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 under `mcpServers` (use **absolute paths**; Claude Desktop does not inherit your shell `PATH`), then
-fully quit and reopen Claude Desktop:
+**fully quit and reopen** Claude Desktop:
 
 ```json
 {
@@ -128,33 +201,86 @@ fully quit and reopen Claude Desktop:
 }
 ```
 
+## The living genome (refresh & scheduling)
+
+Your genome is sequenced once and static; the *interpretation databases* move every month.
+`locus refresh` polls each source, detects new releases against `data/manifest.json`, re-interprets
+only what changed, and writes a ranked "what's new since last run" changelog (the `whats_new` MCP
+tool, the SPA **Changelog** tab, and `data/reports/whats_new.md`).
+
+- **ClinVar reanalysis** (headline) — snapshots your current classifications, fetches the new ClinVar,
+  re-annotates + reloads, and surfaces variants you carry that became (or stopped being) pathogenic,
+  tiered by ClinVar review status.
+- **PGS Catalog** — reports newly published scores (suggest-only; you add relevant IDs to track).
+- **CPIC** — flags pharmacogenomic guideline updates touching genes you carry.
+
+Schedule it weekly (native macOS launchd):
+
+```bash
+uv run locus refresh --dry-run     # preview what would change
+uv run locus refresh               # run it
+uv run locus schedule install      # weekly autopilot (Sun 03:00 by default)
+```
+
+## The debug SPA
+
+`locus serve api` serves both the API and the built React app at `http://127.0.0.1:8787`. Tabs:
+**Search** (rsID / gene / region), **Clinical**, **Pharmacogenomics**, **Ancestry** (continental +
+sub-continental bars + a population PCA scatter), **Risk** (polygenic percentiles), **Traits**,
+**GWAS**, **Changelog**, and **SQL**.
+
+To work on the UI, run the Vite dev server for hot-reload (`make web-dev` on :5173, already
+CORS-allowed to call the API); otherwise `cd web && npm run build` and refresh.
+
 ## Configuration
 
-Paths are env-overridable (see `.env.example`). To keep the genome and the large
+Paths are env-overridable (see `.env.example`, prefix `LOCUS_`). To keep the genome and the large
 reference/annotation databases on an external drive:
 
 ```bash
 LOCUS_DATA_DIR=/Volumes/genome/locus-data
 ```
 
-## Layout
+## Project layout
 
 ```
 src/locus/
   config.py        # env-driven paths (keeps data out of git)
   cli.py           # the `locus` CLI
-  ingest.py        # index, QC, normalize
-  annotate.py      # ClinVar / dbSNP / gnomAD / VEP / PharmCAT
-  load.py          # build the DuckDB store
+  ingest.py        # index, QC, normalize, chr-canonicalize
+  annotate.py      # ClinVar / gnomAD / SnpEff / AlphaMissense / PharmCAT
+  load.py          # build the DuckDB store (+ writers for ancestry/traits/gwas/watch)
   db.py            # DuckDB access (read-only for queries)
-  mcp_server.py    # the Claude interface
+  queries.py       # shared, typed query layer (used by BOTH the MCP server and the API)
+  mcp_server.py    # the Claude interface (typed MCP tools)
   api.py           # FastAPI backend for the SPA
+  ancestry.py      # PCA + k-NN ancestry; markers_genotypes() (hom-ref-aware genotyping primitive)
+  pgs.py           # PGS Catalog scoring + ancestry-matched calibration
+  panels.py        # ACMG SF genes + curated trait/wellness tag SNPs
+  traits.py        # single-SNP traits + mtDNA haplogroup
+  gwas.py          # GWAS Catalog "associations you carry" + on-demand rsID genotyping
+  refresh.py       # the living-genome refresh engine (ClinVar reanalysis, PGS/CPIC watchers)
+  manifest.py      # data/manifest.json — source version tracking
+  schedule.py      # macOS launchd scheduling for `locus refresh`
+  vcfutils.py      # contig/gVCF helpers; shell.py / artifacts.py — shell-outs & canonical paths
 web/               # Vite + React debug SPA
-data/              # (gitignored) genome, reference, annotation DBs, locus.duckdb
+scripts/           # make_fixture.py — synthetic genome for tests
+data/              # (gitignored) genome, reference, annotation DBs, locus.duckdb, manifest.json
+```
+
+## Development
+
+```bash
+uv run pytest -q                       # full pipeline test on the synthetic fixture (no real data)
+uv run ruff check src tests scripts    # lint (line length 120)
+cd web && npm run build                # type-check + build the SPA
 ```
 
 ## Disclaimer
 
-Locus is for personal exploration and education. It is **not** a medical device and its
-output is **not** medical advice. Discuss any health-relevant finding with a qualified
+Locus is for personal exploration and education. It is **not** a medical device and its output is
+**not** medical advice. Polygenic percentiles are research-grade and only valid within an
+ancestry-matched reference; GWAS single-hit associations are weak and must not be summed; the
+HLA-B\*57:01 result is a screening proxy. Discuss any health-relevant finding with a qualified
 clinician or genetic counselor.
+```

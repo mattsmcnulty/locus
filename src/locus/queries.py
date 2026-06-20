@@ -432,6 +432,76 @@ def traits(category: str | None = None) -> TraitsReport:
     return TraitsReport(total=len(items), traits=items)
 
 
+class Association(BaseModel):
+    rsid: str
+    chrom: str
+    pos: int
+    risk_allele: str
+    dosage: int = Field(description="Copies of the risk allele carried (1 or 2)")
+    zygosity: str
+    trait: str
+    mapped_trait: str
+    pval: float
+    or_beta: str | None = None
+    pmid: str | None = None
+
+
+class AssociationPage(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    trait: str | None = None
+    hits: list[Association]
+    note: str = (
+        "GWAS Catalog risk alleles you carry — WEAK / EXPLORATORY single hits (genome-wide "
+        "significant, p<5e-8), each with a tiny effect. Not a calibrated score (see polygenic_risk) "
+        "and never sum these ORs. Ordered by significance."
+    )
+
+
+def gwas_associations(trait: str | None = None, limit: int = 100, offset: int = 0) -> AssociationPage:
+    """GWAS Catalog risk alleles the genome carries, optionally filtered by trait substring."""
+    with connect(read_only=True) as con:
+        exists = con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'associations'"
+        ).fetchone()[0]
+        if not exists:
+            return AssociationPage(total=0, limit=limit, offset=offset, trait=trait, hits=[])
+        where, params = ["TRUE"], []
+        if trait:
+            where.append("(lower(trait) LIKE ? OR lower(mapped_trait) LIKE ?)")
+            params += [f"%{trait.lower()}%", f"%{trait.lower()}%"]
+        clause = " AND ".join(where)
+        total = con.execute(f"SELECT count(*) FROM associations WHERE {clause}", params).fetchone()[0]
+        rows = con.execute(
+            f"SELECT rsid, chrom, pos, risk_allele, dosage, zygosity, trait, mapped_trait, pval, "
+            f"or_beta, pmid FROM associations WHERE {clause} ORDER BY pval ASC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+    hits = [Association(rsid=r[0], chrom=r[1], pos=r[2], risk_allele=r[3], dosage=r[4],
+                        zygosity=r[5], trait=r[6], mapped_trait=r[7], pval=r[8],
+                        or_beta=r[9], pmid=r[10]) for r in rows]
+    return AssociationPage(total=total, limit=limit, offset=offset, trait=trait, hits=hits)
+
+
+class MarkerGenotype(BaseModel):
+    rsid: str
+    chrom: str
+    pos: int
+    genotype: str = Field(description="Observed genotype, e.g. 'A/G'; '—' if not callable")
+    gene: str | None = None
+    clnsig: str | None = None
+    am_class: str | None = None
+
+
+class AskResult(BaseModel):
+    query: str
+    mode: str = Field(description="rsids | trait | error")
+    markers: list[MarkerGenotype]
+    associations: list[Association]
+    note: str
+
+
 def overview() -> dict:
     """Summary stats about the loaded genome (counts, build, annotation coverage)."""
     with connect(read_only=True) as con:

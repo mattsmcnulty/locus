@@ -200,6 +200,30 @@ def setup_alphamissense() -> None:
     console.print(f"[green]AlphaMissense ready[/] → {slim}")
 
 
+GWAS_ASSOC_ZIP = ("https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest/"
+                  "gwas-catalog-associations_ontology-annotated-full.zip")
+
+
+def setup_gwas() -> Path:
+    """Download + unzip the NHGRI-EBI GWAS Catalog associations TSV (GRCh38, ~65 MB zip)."""
+    d = settings.annotations_dir / "gwas"
+    tsv = d / "gwas-catalog-associations.tsv"
+    if tsv.exists():
+        console.print(f"[green]GWAS Catalog present[/] → {tsv}")
+        return tsv
+    d.mkdir(parents=True, exist_ok=True)
+    z = d / "gwas.zip"
+    console.print("[bold]Downloading GWAS Catalog associations (~65 MB)…[/]")
+    _curl(GWAS_ASSOC_ZIP, z)
+    shell.run(["unzip", "-o", "-q", str(z), "-d", str(d)])
+    extracted = sorted(p for p in d.glob("*.tsv") if p != tsv)
+    if extracted:
+        extracted[0].rename(tsv)
+    z.unlink(missing_ok=True)
+    console.print(f"[green]GWAS Catalog ready[/] → {tsv}")
+    return tsv
+
+
 def setup_ancestry() -> None:
     """PLINK2 (native arm64) + the 1000 Genomes GRCh38 reference panel for ancestry/PRS."""
     tools = settings.data_dir / "tools"
@@ -261,6 +285,7 @@ TARGETS = {
     "ancestry": setup_ancestry,
     "alphamissense": setup_alphamissense,
     "haplogrep": setup_haplogrep,
+    "gwas": setup_gwas,
 }
 
 

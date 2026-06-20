@@ -125,6 +125,28 @@ export interface TraitsReport {
   note: string;
 }
 
+export interface Association {
+  rsid: string;
+  chrom: string;
+  pos: number;
+  risk_allele: string;
+  dosage: number;
+  zygosity: string;
+  trait: string;
+  mapped_trait: string;
+  pval: number;
+  or_beta: string | null;
+  pmid: string | null;
+}
+export interface AssociationPage {
+  total: number;
+  limit: number;
+  offset: number;
+  trait: string | null;
+  hits: Association[];
+  note: string;
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error((await r.json().catch(() => ({ detail: r.statusText }))).detail ?? r.statusText);
@@ -145,6 +167,7 @@ export const api = {
   whatsNew: () => get<WhatsNew>("/api/whats_new"),
   traits: () => get<TraitsReport>("/api/traits"),
   secondaryFindings: () => get<VariantPage>("/api/secondary_findings"),
+  gwas: (trait: string) => get<AssociationPage>(`/api/gwas?trait=${encodeURIComponent(trait)}&limit=100`),
   sql: async (query: string): Promise<SqlResult> => {
     const r = await fetch("/api/sql", {
       method: "POST",

@@ -113,6 +113,12 @@ def traits(category: str = ""):
     return queries.traits(category=category or None)
 
 
+@app.get("/api/gwas")
+def gwas(trait: str = "", limit: int = 100, offset: int = 0):
+    _guard_db()
+    return queries.gwas_associations(trait=trait or None, limit=limit, offset=offset)
+
+
 class SqlBody(BaseModel):
     query: str
 

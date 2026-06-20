@@ -189,6 +189,12 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             rsid VARCHAR, category VARCHAR, trait VARCHAR, genotype VARCHAR,
             dosage INTEGER, effect_allele VARCHAR, interpretation VARCHAR, note VARCHAR
         );
+        -- GWAS Catalog risk alleles the genome carries (weak/exploratory; preserved).
+        CREATE TABLE IF NOT EXISTS associations(
+            rsid VARCHAR, chrom VARCHAR, pos BIGINT, risk_allele VARCHAR, dosage INTEGER,
+            zygosity VARCHAR, trait VARCHAR, mapped_trait VARCHAR, pval DOUBLE,
+            or_beta VARCHAR, pmid VARCHAR
+        );
     """)
 
 
@@ -246,6 +252,25 @@ def write_traits(results: list) -> None:
                 "INSERT INTO traits VALUES (?,?,?,?,?,?,?,?)",
                 [(r.rsid, r.category, r.trait, r.genotype, r.dosage, r.effect_allele,
                   r.interpretation, r.note) for r in results],
+            )
+    finally:
+        con.close()
+
+
+def write_associations(carried: list) -> None:
+    """Replace the ``associations`` table with carried GWAS risk alleles. Standalone step
+    (``locus gwas``); leaves variant tables intact."""
+    import duckdb as _d
+
+    con = _d.connect(str(settings.db_path))
+    try:
+        con.execute("DROP TABLE IF EXISTS associations")
+        _create_schema(con)
+        if carried:
+            con.executemany(
+                "INSERT INTO associations VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(c.rsid, c.chrom, c.pos, c.risk_allele, c.dosage, c.zygosity, c.trait,
+                  c.mapped_trait, c.pval, c.or_beta, c.pmid) for c in carried],
             )
     finally:
         con.close()

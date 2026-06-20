@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   api,
   type AncestrySummary,
+  type AssociationPage,
   classifyQuery,
   type Overview,
   type PgsResult,
@@ -13,7 +14,7 @@ import {
   type WhatsNew,
 } from "./api";
 
-type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "traits" | "changelog" | "sql";
+type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "traits" | "gwas" | "changelog" | "sql";
 
 export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -37,7 +38,7 @@ export function App() {
       {overview && <OverviewBar o={overview} />}
 
       <nav className="tabs">
-        {(["search", "clinical", "pgx", "ancestry", "risk", "traits", "changelog", "sql"] as Tab[]).map((t) => (
+        {(["search", "clinical", "pgx", "ancestry", "risk", "traits", "gwas", "changelog", "sql"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
             {t === "pgx" ? "Pharmacogenomics" : t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -51,6 +52,7 @@ export function App() {
         {tab === "ancestry" && <AncestryView />}
         {tab === "risk" && <RiskView />}
         {tab === "traits" && <TraitsView />}
+        {tab === "gwas" && <GwasView />}
         {tab === "changelog" && <ChangelogView />}
         {tab === "sql" && <SqlView />}
       </main>
@@ -290,6 +292,47 @@ function RiskView() {
         they're research-grade estimates, not diagnoses, and absolute risk across ancestries is unreliable.
         Coverage shows the fraction of each score's variants callable in your genome.
       </p>
+    </section>
+  );
+}
+
+function GwasView() {
+  const [q, setQ] = useState("type 2 diabetes");
+  const { data, loading, error, run } = useAsync<AssociationPage>();
+  useEffect(() => {
+    run(() => api.gwas(q));
+  }, []);
+  return (
+    <section>
+      <div className="search-row">
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="trait, e.g. height, asthma…"
+          onKeyDown={(e) => e.key === "Enter" && run(() => api.gwas(q))} />
+        <button onClick={() => run(() => api.gwas(q))}>Search</button>
+      </div>
+      {loading && <p>Loading…</p>}
+      {error && <div className="banner error">{error}</div>}
+      {data && (
+        <>
+          <p className="hint">{data.total.toLocaleString()} carried risk allele(s) for "{data.trait}". {data.note}</p>
+          <table>
+            <thead>
+              <tr><th>rsID</th><th>Risk</th><th>Zygosity</th><th>Trait</th><th>OR/β</th><th>P</th></tr>
+            </thead>
+            <tbody>
+              {data.hits.map((a, i) => (
+                <tr key={i}>
+                  <td>{a.rsid}</td>
+                  <td className="mono">{a.risk_allele}</td>
+                  <td>{a.zygosity}</td>
+                  <td>{a.mapped_trait}</td>
+                  <td className="mono">{a.or_beta ?? ""}</td>
+                  <td className="mono">{a.pval.toExponential(0)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
     </section>
   );
 }

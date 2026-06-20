@@ -353,6 +353,48 @@ def test_traits_compute_runs(genome):
     assert all(r.dosage is None and r.genotype == "—" for r in results)  # off-contig fixture
 
 
+def test_gwas_parse_filters(tmp_path):
+    """GWAS parse keeps only genome-wide-significant single lead SNPs with a real risk allele."""
+    from locus.gwas import parse
+
+    def row(**kw):
+        f = [""] * 36
+        f[1], f[7] = kw.get("pmid", "1"), kw.get("trait", "T")
+        f[11], f[12] = kw.get("chr", "4"), kw.get("pos", "100")
+        f[20], f[21] = kw.get("strongest", "rs1-A"), kw.get("snps", "rs1")
+        f[27], f[30], f[34] = kw.get("p", "1e-10"), kw.get("orb", "1.2"), kw.get("mapped", "trait X")
+        return "\t".join(f)
+
+    tsv = tmp_path / "g.tsv"
+    tsv.write_text("\n".join([
+        "header",
+        row(snps="rs1", strongest="rs1-A", chr="4", pos="100", p="1e-10"),    # keep
+        row(snps="rs2", strongest="rs2-T", chr="7", pos="200", p="1e-3"),      # drop: not significant
+        row(snps="rs3", strongest="rs3-?", chr="7", pos="300", p="1e-20"),     # drop: no risk allele
+        row(snps="rs4; rs5", strongest="rs4-A", chr="7", pos="400", p="1e-20"),  # drop: multi-SNP
+        row(snps="rs6", strongest="rs6-G", chr="7 x 8", pos="500", p="1e-20"),   # drop: multi-locus
+    ]) + "\n")
+    out = parse(tsv)
+    assert {a.rsid for a in out} == {"rs1"}
+    a = out[0]
+    assert a.chrom == "chr4" and a.pos == 100 and a.risk_allele == "A"
+
+
+def test_risk_dosage():
+    """Risk-allele dosage: hom-ref-at-non-risk is 0 (not excluded); strand flip handled;
+    risk allele absent from site -> None."""
+    from locus.gwas import _risk_dosage
+
+    g = lambda a, b: [a, b, False]  # noqa: E731 - cyvcf2-style genotype
+    assert _risk_dosage("A", ["G"], g(0, 0), "G") == 0    # hom-ref, risk=alt not present
+    assert _risk_dosage("A", ["G"], g(0, 1), "G") == 1    # het
+    assert _risk_dosage("A", ["G"], g(1, 1), "G") == 2    # hom-alt
+    assert _risk_dosage("A", ["G"], g(0, 0), "A") == 2    # hom-ref, risk == ref
+    assert _risk_dosage("A", ["G"], g(0, 1), "C") == 1    # strand flip C->G
+    assert _risk_dosage("A", ["T"], g(0, 1), "C") is None  # risk neither at site nor its complement
+    assert _risk_dosage("A", ["G"], g(-1, -1), "G") is None  # no-call
+
+
 def test_refresh_dry_run_no_writes(genome, monkeypatch):
     """Orchestrator (monkeypatched checkers, no network): dry-run surfaces findings but
     writes neither the manifest nor the DB."""

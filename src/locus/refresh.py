@@ -188,6 +188,49 @@ def check_clinvar(man: dict) -> dict | None:
             "url": f"{download.CLINVAR_BASE}/clinvar.vcf.gz", "changed": remote_md5 != current}
 
 
+def check_cpic(man: dict) -> dict | None:
+    """Probe CPIC guideline versions. Returns {version, versions, names, prev_versions, changed}."""
+    import hashlib
+
+    data = _http_json("https://api.cpicpgx.org/v1/guideline?select=id,name,version")
+    if not isinstance(data, list) or not data:
+        return None
+    versions = {str(g["id"]): g.get("version") for g in data if "id" in g}
+    names = {str(g["id"]): g.get("name", "") for g in data}
+    sig = ";".join(f"{k}:{versions[k]}" for k in sorted(versions))
+    version = hashlib.md5(sig.encode()).hexdigest()[:12]
+    prev = manifest.get(man, "cpic")
+    prev_versions = prev.get("versions") if isinstance(prev.get("versions"), dict) else {}
+    return {"version": version, "versions": versions, "names": names,
+            "prev_versions": prev_versions, "url": "https://api.cpicpgx.org/v1/guideline",
+            "changed": version != prev.get("version")}
+
+
+def _cpic_findings(check: dict) -> list[Finding]:
+    """Surface CPIC guideline version bumps that touch a gene the genome has a PGx call for."""
+    prev, cur, names = check["prev_versions"], check["versions"], check["names"]
+    if not prev:  # first run — just record the baseline, don't flood
+        return []
+    with connect(read_only=True) as con:
+        try:
+            genes = {g for (g,) in con.execute("SELECT DISTINCT gene FROM pgx_genes").fetchall() if g}
+        except Exception:  # noqa: BLE001 - table may be absent
+            genes = set()
+    out: list[Finding] = []
+    for gid, ver in cur.items():
+        if prev.get(gid) == ver:
+            continue
+        name = names.get(gid, "")
+        if any(g and g in name for g in genes):
+            out.append(Finding(
+                source="cpic", kind="guideline_update", tier="moderate",
+                title=f"CPIC guideline updated: {name}",
+                detail="A pharmacogenomic guideline for a gene you carry a result for changed — "
+                       "re-check the dosing guidance via `pharmacogenomics`.",
+                new_value=str(ver), release=str(ver)))
+    return out
+
+
 def check_pgs(man: dict) -> dict | None:
     """Probe the PGS Catalog current release. Returns {version, n_new, ids, changed} or None."""
     data = _http_json("https://www.pgscatalog.org/rest/release/current")
@@ -240,7 +283,7 @@ def _summarize_pgs(check: dict) -> list[Finding]:
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────────
-ALL_SOURCES = ["clinvar", "pgs"]
+ALL_SOURCES = ["clinvar", "pgs", "cpic"]
 
 
 def _write_report(findings: list[Finding], ts: str) -> Path | None:
@@ -277,6 +320,7 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
     findings: list[Finding] = []
     source_updates: list[tuple] = []  # (name, version, url, checksum, changed)
     pgs_new_ids: list[str] = []       # new PGS score IDs to mark seen
+    cpic_versions: dict | None = None  # per-guideline versions to persist
 
     if "clinvar" in requested:
         chk = check_clinvar(man)
@@ -307,6 +351,18 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
                 pgs_new_ids = chk["ids"]
             source_updates.append(("pgs_catalog", chk["version"], chk["url"], "", chk["changed"]))
 
+    if "cpic" in requested:
+        chk = check_cpic(man)
+        if chk is None:
+            console.print("[yellow]CPIC: probe failed — skipping.[/]")
+        else:
+            console.print(f"CPIC: {len(chk['versions'])} guidelines "
+                          f"({'NEW' if chk['changed'] else 'unchanged'})")
+            if chk["changed"]:
+                findings += _cpic_findings(chk)
+            cpic_versions = chk["versions"]
+            source_updates.append(("cpic", chk["version"], chk["url"], "", chk["changed"]))
+
     # Rank strongest-first for the printed digest.
     findings.sort(key=lambda f: TIER_ORDER.index(f.tier) if f.tier in TIER_ORDER else len(TIER_ORDER))
     _print_digest(findings, dry_run)
@@ -318,6 +374,8 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
     # Persist: manifest (source of truth) + sources table + findings + report.
     for name, version, url, checksum, changed in source_updates:
         manifest.record(man, name, version=version, url=url, checksum=checksum, changed=changed)
+    if cpic_versions is not None:  # persist the per-guideline version map for precise diffs
+        man.setdefault("cpic", {})["versions"] = cpic_versions
     manifest.save(man)
     with connect(read_only=False) as con:
         for name, version, url, checksum, _changed in source_updates:

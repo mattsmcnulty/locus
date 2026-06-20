@@ -196,6 +196,15 @@ def traits() -> None:
 
 
 @app.command()
+def gwas() -> None:
+    """Genotype GWAS Catalog risk alleles (p<5e-8) and store the ones this genome carries."""
+    from . import gwas as _gwas
+
+    settings.ensure_dirs()
+    _gwas.run()
+
+
+@app.command()
 def pipeline(
     normalize: bool = typer.Option(True, help="Normalize during ingest."),
     steps: str = typer.Option("all", help="Annotation steps to run."),

@@ -161,6 +161,18 @@ def polygenic_risk() -> PolygenicRiskReport:
 
 
 @mcp.tool()
+def gwas_associations(trait: str = "", limit: int = 100) -> queries.AssociationPage:
+    """GWAS Catalog risk alleles THIS genome carries (genome-wide significant, p<5e-8), optionally
+    filtered by `trait` substring (e.g. 'type 2 diabetes', 'height'). WEAK / EXPLORATORY: single hits
+    with tiny effects — do NOT sum them or read them like a calibrated score (use polygenic_risk for
+    that). Ordered by significance. Requires `locus gwas` to have run."""
+    err = _require_db()
+    if err:
+        return queries.AssociationPage(total=0, limit=limit, offset=0, hits=[])
+    return queries.gwas_associations(trait=trait or None, limit=limit)
+
+
+@mcp.tool()
 def whats_new(since: str = "", tier: str = "") -> queries.WhatsNew:
     """What changed about THIS genome since the last `locus refresh` — the deterministic
     changelog (e.g. ClinVar variants you carry that were newly classified pathogenic or
@@ -170,6 +182,40 @@ def whats_new(since: str = "", tier: str = "") -> queries.WhatsNew:
     if err:
         return queries.WhatsNew(total=0, counts_by_tier={}, findings=[])
     return queries.whats_new(since=since or None, tier=tier or None)
+
+
+@mcp.tool()
+def ask_about(query: str, limit: int = 50) -> queries.AskResult:
+    """On-demand: given a condition/trait name OR a paper's rsIDs (space/comma-separated), report what
+    THIS genome carries. rsIDs → live genotype lookup at those positions (hom-ref-aware) plus any
+    ClinVar/AlphaMissense we already have; a trait name → your carried GWAS associations for it. This is
+    the 'keep up with new studies' tool: paste rsIDs from a new paper to see your genotypes. Weak
+    single-variant evidence — informational, not diagnostic."""
+    import re as _re
+
+    err = _require_db()
+    if err:
+        return queries.AskResult(query=query, mode="error", markers=[], associations=[], note=err)
+    rsids = _re.findall(r"rs\d+", query, _re.IGNORECASE)
+    if rsids:
+        import contextlib
+        import sys
+
+        from . import gwas
+
+        # markers_genotypes shells out and logs to stdout; redirect to stderr so it can't
+        # corrupt the stdio JSON-RPC stream (safe — FastMCP isn't writing during this sync call).
+        with contextlib.redirect_stdout(sys.stderr):
+            rows = gwas.ask_markers(rsids)
+        markers = [queries.MarkerGenotype(**r) for r in rows]
+        note = ("Live genotype lookup at the requested SNPs (Ensembl GRCh38 coords, hom-ref-aware). "
+                "Single-variant evidence — confirm context before interpreting."
+                if markers else "Could not resolve those rsIDs (Ensembl lookup failed or unknown IDs).")
+        return queries.AskResult(query=query, mode="rsids", markers=markers, associations=[], note=note)
+    page = queries.gwas_associations(trait=query, limit=limit)
+    note = page.note if page.hits else ("No carried GWAS associations for that trait. Run `locus gwas` "
+                                        "first, or pass rsIDs to genotype specific variants.")
+    return queries.AskResult(query=query, mode="trait", markers=[], associations=page.hits, note=note)
 
 
 @mcp.tool()

@@ -80,6 +80,8 @@ def _empty_cols() -> dict[str, list]:
         cols[f.lower()] = []
     for f in _GNOMAD_FIELDS:
         cols[f.lower()] = []
+    cols["am_pathogenicity"] = []
+    cols["am_class"] = []
     return cols
 
 
@@ -105,6 +107,9 @@ def _variant_batches(path: Path):
             for f in _GNOMAD_FIELDS:
                 val = v.INFO.get(f) if f in info_ids else None
                 cols[f.lower()].append(float(val) if isinstance(val, (int, float)) else _as_str(val))
+            amp = v.INFO.get("am_pathogenicity") if "am_pathogenicity" in info_ids else None
+            cols["am_pathogenicity"].append(float(amp) if isinstance(amp, (int, float)) else None)
+            cols["am_class"].append(_as_str(v.INFO.get("am_class")) if "am_class" in info_ids else None)
             n += 1
             if len(cols["pos"]) >= BATCH:
                 yield pa.table(cols)
@@ -135,7 +140,8 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             clnsig VARCHAR, clndn VARCHAR, clnrevstat VARCHAR, clnvc VARCHAR,
             clndisdb VARCHAR, clnhgvs VARCHAR, mc VARCHAR, alleleid VARCHAR,
             gnomad_af DOUBLE, gnomad_af_grpmax DOUBLE, gnomad_grpmax VARCHAR,
-            gnomad_ac VARCHAR, gnomad_an VARCHAR
+            gnomad_ac VARCHAR, gnomad_an VARCHAR,
+            am_pathogenicity DOUBLE, am_class VARCHAR
         );
         CREATE TABLE IF NOT EXISTS cnv(
             chrom VARCHAR, pos BIGINT, "end" BIGINT, svtype VARCHAR, alt VARCHAR,
@@ -151,7 +157,51 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE IF NOT EXISTS pgx_drugs(
             drug VARCHAR, gene VARCHAR, source VARCHAR, recommendation VARCHAR, classification VARCHAR
         );
+        CREATE TABLE IF NOT EXISTS ancestry_global(
+            superpop VARCHAR, name VARCHAR, proportion DOUBLE
+        );
+        CREATE TABLE IF NOT EXISTS ancestry_pca(
+            label VARCHAR, pc1 DOUBLE, pc2 DOUBLE, is_sample BOOLEAN
+        );
+        CREATE TABLE IF NOT EXISTS pgs_scores(
+            pgs_id VARCHAR, trait VARCHAR, raw DOUBLE, percentile DOUBLE,
+            ancestry VARCHAR, n_used INTEGER, coverage DOUBLE
+        );
     """)
+
+
+def write_ancestry(ancestry_result, pgs_scores: list) -> None:
+    """Write ancestry + polygenic-score results into the existing DuckDB store.
+
+    Runs as a standalone step (``locus ancestry``) — replaces just these tables,
+    leaving the variant tables intact. Requires no other process holding the DB.
+    """
+    import duckdb as _d
+
+    from .config import settings
+
+    con = _d.connect(str(settings.db_path))
+    try:
+        _create_schema(con)
+        con.execute("DELETE FROM ancestry_global; DELETE FROM ancestry_pca; DELETE FROM pgs_scores")
+        if ancestry_result is not None:
+            from .ancestry import SUPERPOPS
+
+            con.executemany("INSERT INTO ancestry_global VALUES (?,?,?)", [
+                (sp, SUPERPOPS.get(sp, sp), frac)
+                for sp, frac in ancestry_result.proportions.items() if frac > 0
+            ])
+            rows = [("you", ancestry_result.sample_pcs[0], ancestry_result.sample_pcs[1], True)]
+            for sp, (p1, p2) in ancestry_result.ref_centroids.items():
+                rows.append((sp, p1, p2, False))
+            con.executemany("INSERT INTO ancestry_pca VALUES (?,?,?,?)", rows)
+        if pgs_scores:
+            con.executemany("INSERT INTO pgs_scores VALUES (?,?,?,?,?,?,?)", [
+                (s.pgs_id, s.trait, s.raw, s.percentile, s.ancestry, s.n_used, s.coverage)
+                for s in pgs_scores
+            ])
+    finally:
+        con.close()
 
 
 def _finalize(con: duckdb.DuckDBPyConnection) -> None:
@@ -279,14 +329,15 @@ def run() -> Path:
         raise FileNotFoundError(f"No sites/annotated VCF found ({src}). Run `locus ingest` first.")
 
     db_path = settings.db_path
-    if db_path.exists():
-        db_path.unlink()  # fresh build; readers must be detached
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     console.rule("[bold]Load → DuckDB")
     console.print(f"source : {src.name}")
     con = duckdb.connect(str(db_path))
     try:
+        # Rebuild only the variant-derived tables; preserve ancestry/PGS (written by `locus ancestry`).
+        for t in ("variants", "cnv", "sv", "pgx_genes", "pgx_drugs", "meta"):
+            con.execute(f"DROP TABLE IF EXISTS {t}")
         _create_schema(con)
         total = 0
         for tbl in _variant_batches(src):

@@ -171,6 +171,20 @@ def load() -> None:
 
 
 @app.command()
+def ancestry() -> None:
+    """Estimate biogeographic ancestry and ancestry-calibrated polygenic risk scores."""
+    from . import ancestry as _ancestry
+    from . import load as _load
+    from . import pgs as _pgs
+
+    settings.ensure_dirs()
+    anc = _ancestry.run()
+    scores = _pgs.run(nearest_superpop=anc.nearest)
+    _load.write_ancestry(anc, scores)
+    console.print("[green]Ancestry + polygenic scores written to the database.[/]")
+
+
+@app.command()
 def pipeline(
     normalize: bool = typer.Option(True, help="Normalize during ingest."),
     steps: str = typer.Option("all", help="Annotation steps to run."),

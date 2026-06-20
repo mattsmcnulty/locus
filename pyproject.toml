@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "cyvcf2>=0.31",       # fast VCF parsing (htslib-backed)
+    "numpy>=2.0",         # ancestry PCA math / PRS calibration
     "duckdb>=1.1",        # local columnar query store
     "pyarrow>=17",        # cyvcf2 -> Arrow -> DuckDB bridge
     "fastapi>=0.115",     # SPA backend

@@ -15,6 +15,8 @@ export interface Variant {
   clnrevstat: string | null;
   gnomad_af: number | null;
   gnomad_af_grpmax: number | null;
+  am_pathogenicity: number | null;
+  am_class: string | null;
 }
 
 export interface VariantPage {
@@ -57,6 +59,32 @@ export interface SqlResult {
   truncated_to: number;
 }
 
+export interface AncestryComponent {
+  superpop: string;
+  name: string;
+  proportion: number;
+}
+export interface PcaPoint {
+  label: string;
+  pc1: number;
+  pc2: number;
+  is_sample: boolean;
+}
+export interface AncestrySummary {
+  components: AncestryComponent[];
+  pca: PcaPoint[];
+  note: string;
+}
+export interface PgsResult {
+  pgs_id: string;
+  trait: string;
+  raw: number;
+  percentile: number | null;
+  ancestry: string | null;
+  n_used: number;
+  coverage: number;
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error((await r.json().catch(() => ({ detail: r.statusText }))).detail ?? r.statusText);
@@ -72,6 +100,8 @@ export const api = {
     get<VariantPage>(`/api/clinical?gene=${encodeURIComponent(gene)}&significance=${encodeURIComponent(significance)}`),
   pgx: (gene = "", drug = "") =>
     get<PgxResult>(`/api/pgx?gene=${encodeURIComponent(gene)}&drug=${encodeURIComponent(drug)}`),
+  ancestry: () => get<AncestrySummary>("/api/ancestry"),
+  pgs: () => get<PgsResult[]>("/api/pgs"),
   sql: async (query: string): Promise<SqlResult> => {
     const r = await fetch("/api/sql", {
       method: "POST",

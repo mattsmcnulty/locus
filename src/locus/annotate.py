@@ -34,7 +34,7 @@ GNOMAD_GENOMES = (
     "gnomad.genomes.v4.1.sites.{chrom}.vcf.bgz"
 )
 
-ALL_STEPS = ["clinvar", "gnomad", "snpeff", "pharmcat"]
+ALL_STEPS = ["clinvar", "gnomad", "snpeff", "alphamissense", "pharmcat"]
 
 
 def _index(vcf: Path) -> None:
@@ -127,6 +127,33 @@ def annotate_snpeff(src: Path, dest: Path) -> Path:
     cmd = " ".join(shell.java_cmd(["-Xmx6g", "-jar", str(jar), "-noStats", download.SNPEFF_DB, str(src)]))
     shell.sh(f"{cmd} | bgzip -c > {dest}")
     _index(dest)
+    return dest
+
+
+def annotate_alphamissense(src: Path, dest: Path) -> Path:
+    """Annotate missense pathogenicity from AlphaMissense (calibrated score for ~every missense).
+
+    Fills the gap where ClinVar is silent: a high am_pathogenicity on a variant ClinVar has never
+    seen is real signal, not 'nothing'.
+    """
+    am = settings.annotations_dir / "alphamissense" / "AlphaMissense_hg38.slim.tsv.bgz"
+    if not am.exists():
+        console.print("[yellow]AlphaMissense missing — skipping. Run `locus download alphamissense`.[/]")
+        return src
+    header = settings.work_dir / "am.header.txt"
+    header.write_text(
+        '##INFO=<ID=am_pathogenicity,Number=1,Type=Float,Description="AlphaMissense pathogenicity (0-1)">\n'
+        '##INFO=<ID=am_class,Number=1,Type=String,Description="AlphaMissense class (benign/ambiguous/pathogenic)">\n'
+    )
+    console.print("Annotating AlphaMissense missense pathogenicity…")
+    shell.run([
+        "bcftools", "annotate", "-a", str(am), "-h", str(header),
+        "-c", "CHROM,POS,REF,ALT,am_pathogenicity,am_class",
+        str(src), "-Oz", "-o", str(dest),
+    ])
+    _index(dest)
+    n = shell.capture(["bash", "-c", f"bcftools view -H {dest} 2>/dev/null | grep -c am_pathogenicity || true"]).strip()
+    console.print(f"  AlphaMissense-annotated records: {n}")
     return dest
 
 
@@ -230,6 +257,8 @@ def run(steps: str = "all") -> Path:
         cur = annotate_gnomad(cur, work / f"{settings.sample_id}.gnomad.vcf.gz")
     if "snpeff" in requested or "vep" in requested:
         cur = annotate_snpeff(cur, work / f"{settings.sample_id}.snpeff.vcf.gz")
+    if "alphamissense" in requested:
+        cur = annotate_alphamissense(cur, work / f"{settings.sample_id}.am.vcf.gz")
 
     # Finalize the small-variant annotated VCF.
     dest = artifacts.annotated_vcf()

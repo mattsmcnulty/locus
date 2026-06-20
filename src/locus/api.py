@@ -83,6 +83,18 @@ def structural(region: str, limit: int = 100):
         raise HTTPException(400, str(e)) from e
 
 
+@app.get("/api/ancestry")
+def ancestry():
+    _guard_db()
+    return queries.ancestry()
+
+
+@app.get("/api/pgs")
+def pgs():
+    _guard_db()
+    return queries.polygenic_risk()
+
+
 class SqlBody(BaseModel):
     query: str
 

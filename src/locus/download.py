@@ -141,6 +141,71 @@ def setup_pharmcat() -> Path:
     return pipeline
 
 
+PLINK2_URL = "https://s3.amazonaws.com/plink2-assets/alpha7/plink2_mac_arm64_20260504.zip"
+# Canonical matched 1000 Genomes GRCh38 trio from the PLINK2 resources page.
+PANEL_PGEN_URL = "https://www.dropbox.com/s/j72j6uciq5zuzii/all_hg38.pgen.zst?dl=1"
+PANEL_PVAR_URL = (
+    "https://www.dropbox.com/scl/fi/fn0bcm5oseyuawxfvkcpb/all_hg38_rs.pvar.zst"
+    "?rlkey=przncwb78rhz4g4ukovocdxaz&dl=1"
+)
+PANEL_PSAM_URL = (
+    "https://www.dropbox.com/scl/fi/u5udzzaibgyvxzfnjcvjc/hg38_corrected.psam"
+    "?rlkey=oecjnk4vmbhc8b1p202l0ih4x&dl=1"
+)
+
+
+ALPHAMISSENSE_URL = "https://zenodo.org/records/8208688/files/AlphaMissense_hg38.tsv.gz?download=1"
+
+
+def setup_alphamissense() -> None:
+    """Download AlphaMissense hg38 + prepare a slim, tabix-indexed file for bcftools annotate."""
+    d = settings.annotations_dir / "alphamissense"
+    slim = d / "AlphaMissense_hg38.slim.tsv.bgz"
+    if slim.exists() and Path(str(slim) + ".tbi").exists():
+        console.print(f"[green]AlphaMissense present[/] → {slim}")
+        return
+    d.mkdir(parents=True, exist_ok=True)
+    raw = d / "AlphaMissense_hg38.tsv.gz"
+    if not raw.exists():
+        console.print("[bold]Downloading AlphaMissense hg38 (~640 MB)…[/]")
+        _curl(ALPHAMISSENSE_URL, raw)
+    console.print("Preparing AlphaMissense (slim + bgzip + tabix)…")
+    shell.sh(f"gzip -dc {raw} | grep -v '^#' | cut -f1,2,3,4,9,10 | bgzip -@ 4 > {slim}")
+    shell.run(["tabix", "-s", "1", "-b", "2", "-e", "2", str(slim)])
+    console.print(f"[green]AlphaMissense ready[/] → {slim}")
+
+
+def setup_ancestry() -> None:
+    """PLINK2 (native arm64) + the 1000 Genomes GRCh38 reference panel for ancestry/PRS."""
+    tools = settings.data_dir / "tools"
+    plink2 = tools / "plink2"
+    if not plink2.exists():
+        tools.mkdir(parents=True, exist_ok=True)
+        zip_path = tools / "plink2.zip"
+        console.print("[bold]Downloading PLINK2 (arm64)…[/]")
+        _curl(PLINK2_URL, zip_path)
+        shell.run(["unzip", "-o", "-q", str(zip_path), "-d", str(tools)])
+        plink2.chmod(0o755)
+        zip_path.unlink(missing_ok=True)
+
+    anc = settings.annotations_dir / "ancestry"
+    anc.mkdir(parents=True, exist_ok=True)
+    pgen, pvar, psam = anc / "all_hg38.pgen", anc / "all_hg38.pvar.zst", anc / "hg38_corrected.psam"
+    if not psam.exists():
+        _curl(PANEL_PSAM_URL, psam)
+    if not pvar.exists():
+        console.print("[bold]Downloading 1000 Genomes panel pvar (~2.7 GB)…[/]")
+        _curl(PANEL_PVAR_URL, pvar)
+    if not pgen.exists():
+        console.print("[bold]Downloading 1000 Genomes panel pgen (~3 GB)…[/]")
+        zst = anc / "all_hg38.pgen.zst"
+        _curl(PANEL_PGEN_URL, zst)
+        console.print("Decompressing pgen…")
+        shell.run(["zstd", "-d", "-f", str(zst), "-o", str(pgen)])
+        zst.unlink(missing_ok=True)
+    console.print("[green]Ancestry toolchain + panel ready.[/]")
+
+
 # Targets that require an explicit, deliberate opt-in (very large).
 def guidance_large() -> None:
     console.print(
@@ -156,6 +221,8 @@ TARGETS = {
     "clinvar": download_clinvar,
     "snpeff": setup_snpeff,
     "pharmcat": setup_pharmcat,
+    "ancestry": setup_ancestry,
+    "alphamissense": setup_alphamissense,
 }
 
 

@@ -90,6 +90,39 @@ def structural_variants(region: str, limit: int = 100) -> list[queries.Structura
 
 
 @mcp.tool()
+def predicted_damaging(gene: str = "", limit: int = 100) -> queries.VariantPage:
+    """Rare, predicted-damaging missense variants from AlphaMissense — the 'ClinVar is silent' set:
+    variants ClinVar never classified but AlphaMissense scores as likely pathogenic (and rare, AF<1%).
+    Optionally filter by gene. Use this when ClinVar returns nothing for a gene of interest."""
+    err = _require_db()
+    if err:
+        return {"error": err}  # type: ignore[return-value]
+    return queries.predicted_damaging(gene=gene or None, limit=limit)
+
+
+@mcp.tool()
+def ancestry() -> queries.AncestrySummary:
+    """Estimated biogeographic ancestry: continental proportions (k-NN over 1000 Genomes) and the
+    PCA placement. Continental ancestry is reliable; finer/admixed breakdowns are approximate.
+    Requires `locus ancestry` to have run."""
+    err = _require_db()
+    if err:
+        return {"error": err}  # type: ignore[return-value]
+    return queries.ancestry()
+
+
+@mcp.tool()
+def polygenic_risk() -> list[queries.PgsResult]:
+    """Polygenic (aggregate) risk scores for common traits (CAD, LDL, T2D, AFib, Lp(a)), reported as
+    an ancestry-matched percentile where available. Percentiles are only meaningful within the matched
+    ancestry; these are research-grade estimates, not diagnoses. Requires `locus ancestry` to have run."""
+    err = _require_db()
+    if err:
+        return {"error": err}  # type: ignore[return-value]
+    return queries.polygenic_risk()
+
+
+@mcp.tool()
 def run_sql(query: str) -> dict:
     """Run a read-only SELECT against the genome database for power queries. Tables: variants
     (chrom,pos,ref,alt,rsid,gt,filter,gene,consequence,clnsig,clndn,clnrevstat,gnomad_af,gnomad_af_grpmax),

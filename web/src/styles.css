@@ -70,4 +70,18 @@ th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size
 
 h3 { margin: 20px 0 6px; }
 
+/* Ancestry / risk bars */
+.bar-row { display: flex; align-items: center; gap: 12px; margin: 6px 0; }
+.bar-label { width: 170px; font-size: 13px; }
+.bar-track { flex: 1; height: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.bar-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+.bar-val { width: 80px; text-align: right; font-size: 13px; color: var(--muted); }
+
+/* PCA scatter */
+svg.pca { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin: 8px 0; }
+.pca-ref { fill: var(--muted); opacity: 0.6; }
+.pca-you { fill: var(--path); stroke: white; stroke-width: 1.5; }
+.pca-lbl { fill: var(--muted); font-size: 10px; }
+.pca-lbl.you { fill: var(--path); font-weight: 700; }
+
 footer { margin-top: 40px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 14px; }

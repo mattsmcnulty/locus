@@ -18,6 +18,7 @@ from .db import connect
 _VAR_COLS = (
     "chrom", "pos", "ref", "alt", "rsid", "gt", "filter", "gene", "consequence",
     "clnsig", "clndn", "clnrevstat", "gnomad_af", "gnomad_af_grpmax",
+    "am_pathogenicity", "am_class",
 )
 
 
@@ -36,6 +37,8 @@ class Variant(BaseModel):
     clnrevstat: str | None = Field(default=None, description="ClinVar review status (star rating)")
     gnomad_af: float | None = Field(default=None, description="gnomAD global allele frequency")
     gnomad_af_grpmax: float | None = Field(default=None, description="gnomAD max per-ancestry AF")
+    am_pathogenicity: float | None = Field(default=None, description="AlphaMissense pathogenicity (0-1)")
+    am_class: str | None = Field(default=None, description="AlphaMissense class (benign/ambiguous/pathogenic)")
 
 
 class VariantPage(BaseModel):
@@ -148,6 +151,22 @@ def clinical_findings(
     return _var_select(" AND ".join(where), params, limit, offset)
 
 
+def predicted_damaging(
+    gene: str | None = None, max_af: float = 0.01, limit: int = 100, offset: int = 0
+) -> VariantPage:
+    """Rare, predicted-damaging missense variants (AlphaMissense pathogenic + rare/unannotated).
+
+    This is the 'ClinVar is silent' set — variants ClinVar has never classified but AlphaMissense
+    scores as likely damaging. Defaults to allele frequency < 1%.
+    """
+    where = ["am_class LIKE '%pathogenic%'", "(gnomad_af IS NULL OR gnomad_af < ?)"]
+    params: list = [max_af]
+    if gene:
+        where.append("upper(gene) = upper(?)")
+        params.append(gene.strip())
+    return _var_select(" AND ".join(where), params, limit, offset)
+
+
 def allele_frequency(region_or_variant: str) -> VariantPage:
     """How common is a variant? Looks up gnomAD AF for a position/region."""
     return lookup_by_region(region_or_variant, limit=50, offset=0)
@@ -220,6 +239,63 @@ def run_sql(sql: str, max_rows: int = 200) -> dict:
         names = [d[0] for d in cur.description]
         rows = cur.fetchmany(max_rows)
     return {"columns": names, "rows": [list(r) for r in rows], "truncated_to": max_rows}
+
+
+class AncestryComponent(BaseModel):
+    superpop: str
+    name: str
+    proportion: float = Field(description="Fraction (0-1); k-NN estimate over 1000 Genomes")
+
+
+class PcaPoint(BaseModel):
+    label: str
+    pc1: float
+    pc2: float
+    is_sample: bool
+
+
+class AncestrySummary(BaseModel):
+    components: list[AncestryComponent]
+    pca: list[PcaPoint]
+    note: str = (
+        "Estimate from nearest-neighbour placement among 1000 Genomes populations. "
+        "Continental ancestry is reliable; finer/admixed breakdowns are approximate."
+    )
+
+
+class PgsResult(BaseModel):
+    pgs_id: str
+    trait: str
+    raw: float
+    percentile: float | None = Field(default=None, description="Within the ancestry-matched reference")
+    ancestry: str | None = None
+    n_used: int
+    coverage: float
+
+
+def ancestry() -> AncestrySummary:
+    with connect(read_only=True) as con:
+        comps = con.execute(
+            "SELECT superpop, name, proportion FROM ancestry_global ORDER BY proportion DESC"
+        ).fetchall()
+        pca = con.execute("SELECT label, pc1, pc2, is_sample FROM ancestry_pca").fetchall()
+    return AncestrySummary(
+        components=[AncestryComponent(superpop=c[0], name=c[1], proportion=c[2]) for c in comps],
+        pca=[PcaPoint(label=p[0], pc1=p[1], pc2=p[2], is_sample=p[3]) for p in pca],
+    )
+
+
+def polygenic_risk() -> list[PgsResult]:
+    with connect(read_only=True) as con:
+        rows = con.execute(
+            "SELECT pgs_id, trait, raw, percentile, ancestry, n_used, coverage "
+            "FROM pgs_scores ORDER BY trait"
+        ).fetchall()
+    return [
+        PgsResult(pgs_id=r[0], trait=r[1], raw=r[2], percentile=r[3], ancestry=r[4],
+                  n_used=r[5], coverage=r[6])
+        for r in rows
+    ]
 
 
 def overview() -> dict:

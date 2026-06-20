@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
 import {
   api,
+  type AncestrySummary,
   classifyQuery,
   type Overview,
+  type PgsResult,
   type PgxResult,
   type SqlResult,
   type Variant,
   type VariantPage,
 } from "./api";
 
-type Tab = "search" | "clinical" | "pgx" | "sql";
+type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "sql";
 
 export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -33,7 +35,7 @@ export function App() {
       {overview && <OverviewBar o={overview} />}
 
       <nav className="tabs">
-        {(["search", "clinical", "pgx", "sql"] as Tab[]).map((t) => (
+        {(["search", "clinical", "pgx", "ancestry", "risk", "sql"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
             {t === "pgx" ? "Pharmacogenomics" : t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -44,6 +46,8 @@ export function App() {
         {tab === "search" && <SearchView />}
         {tab === "clinical" && <ClinicalView />}
         {tab === "pgx" && <PgxView />}
+        {tab === "ancestry" && <AncestryView />}
+        {tab === "risk" && <RiskView />}
         {tab === "sql" && <SqlView />}
       </main>
 
@@ -196,6 +200,88 @@ function PgxView() {
   );
 }
 
+function AncestryView() {
+  const { data, loading, error, run } = useAsync<AncestrySummary>();
+  useEffect(() => {
+    run(() => api.ancestry());
+  }, []);
+  if (loading) return <p>Loading…</p>;
+  if (error) return <div className="banner error">{error}</div>;
+  if (!data || data.components.length === 0)
+    return <p className="hint">No ancestry results yet. Run <code>locus ancestry</code>.</p>;
+
+  // PCA scatter scaling
+  const pts = data.pca;
+  const xs = pts.map((p) => p.pc1);
+  const ys = pts.map((p) => p.pc2);
+  const [xmin, xmax] = [Math.min(...xs), Math.max(...xs)];
+  const [ymin, ymax] = [Math.min(...ys), Math.max(...ys)];
+  const W = 360, H = 260, pad = 30;
+  const sx = (v: number) => pad + ((v - xmin) / (xmax - xmin || 1)) * (W - 2 * pad);
+  const sy = (v: number) => H - pad - ((v - ymin) / (ymax - ymin || 1)) * (H - 2 * pad);
+
+  return (
+    <section>
+      <h3>Estimated ancestry</h3>
+      {data.components.map((c) => (
+        <div key={c.superpop} className="bar-row">
+          <span className="bar-label">{c.name}</span>
+          <span className="bar-track"><span className="bar-fill" style={{ width: `${c.proportion * 100}%` }} /></span>
+          <span className="bar-val">{(c.proportion * 100).toFixed(0)}%</span>
+        </div>
+      ))}
+      <h3>Where you fall among world populations (PC1 × PC2)</h3>
+      <svg width={W} height={H} className="pca">
+        {pts.filter((p) => !p.is_sample).map((p) => (
+          <g key={p.label}>
+            <circle cx={sx(p.pc1)} cy={sy(p.pc2)} r={5} className="pca-ref" />
+            <text x={sx(p.pc1) + 7} y={sy(p.pc2) + 3} className="pca-lbl">{p.label}</text>
+          </g>
+        ))}
+        {pts.filter((p) => p.is_sample).map((p) => (
+          <g key="you">
+            <circle cx={sx(p.pc1)} cy={sy(p.pc2)} r={6} className="pca-you" />
+            <text x={sx(p.pc1) + 8} y={sy(p.pc2) + 3} className="pca-lbl you">you</text>
+          </g>
+        ))}
+      </svg>
+      <p className="hint">{data.note}</p>
+    </section>
+  );
+}
+
+function RiskView() {
+  const { data, loading, error, run } = useAsync<PgsResult[]>();
+  useEffect(() => {
+    run(() => api.pgs());
+  }, []);
+  if (loading) return <p>Loading…</p>;
+  if (error) return <div className="banner error">{error}</div>;
+  if (!data || data.length === 0)
+    return <p className="hint">No polygenic scores yet. Run <code>locus ancestry</code>.</p>;
+  return (
+    <section>
+      <h3>Polygenic (aggregate) risk</h3>
+      {data.map((s) => (
+        <div key={s.pgs_id} className="bar-row">
+          <span className="bar-label">{s.trait}</span>
+          <span className="bar-track">
+            {s.percentile !== null && <span className="bar-fill" style={{ width: `${s.percentile}%` }} />}
+          </span>
+          <span className="bar-val">
+            {s.percentile !== null ? `${s.percentile.toFixed(0)}th pct` : "raw only"}
+          </span>
+        </div>
+      ))}
+      <p className="hint">
+        Percentiles are within your ancestry-matched 1000 Genomes reference{data[0]?.ancestry ? ` (${data[0].ancestry})` : ""};
+        they're research-grade estimates, not diagnoses, and absolute risk across ancestries is unreliable.
+        Coverage shows the fraction of each score's variants callable in your genome.
+      </p>
+    </section>
+  );
+}
+
 function SqlView() {
   const [q, setQ] = useState("SELECT chrom, pos, ref, alt, rsid, gene, clnsig FROM variants LIMIT 50");
   const { data, loading, error, run } = useAsync<SqlResult>();
@@ -235,6 +321,7 @@ function VariantTable({ page, clinical }: { page: VariantPage; clinical?: boolea
             <th>Locus</th><th>Ref→Alt</th><th>rsID</th><th>GT</th><th>Gene</th>
             {clinical ? <th>Significance</th> : <th>Consequence</th>}
             {clinical ? <th>Disease</th> : <th>gnomAD AF</th>}
+            <th>AlphaMissense</th>
           </tr>
         </thead>
         <tbody>
@@ -251,6 +338,9 @@ function VariantTable({ page, clinical }: { page: VariantPage; clinical?: boolea
                 <td>{v.consequence ?? ""}</td>
               )}
               {clinical ? <td>{v.clndn ?? ""}</td> : <td>{v.gnomad_af ?? ""}</td>}
+              <td className={/pathogenic/.test(v.am_class ?? "") ? "sig-path" : ""}>
+                {v.am_class ? `${v.am_class}${v.am_pathogenicity != null ? ` (${v.am_pathogenicity.toFixed(2)})` : ""}` : ""}
+              </td>
             </tr>
           ))}
         </tbody>

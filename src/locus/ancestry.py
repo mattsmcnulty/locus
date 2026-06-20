@@ -36,7 +36,25 @@ SUPERPOPS = {
     "EUR": "European",
     "SAS": "South Asian",
 }
+
+# Fine population display names (1000 Genomes 26 populations + HGDP groups if present).
+POPULATIONS = {
+    # EUR
+    "GBR": "British (England/Scotland)", "CEU": "Northwest European (Utah)", "IBS": "Iberian (Spain)",
+    "TSI": "Tuscan (Italy)", "FIN": "Finnish",
+    # SAS
+    "GIH": "Gujarati", "PJL": "Punjabi", "BEB": "Bengali", "STU": "Sri Lankan Tamil", "ITU": "Telugu",
+    # EAS
+    "CHB": "Han Chinese (Beijing)", "CHS": "Han Chinese (South)", "JPT": "Japanese",
+    "CDX": "Dai Chinese", "KHV": "Kinh (Vietnam)",
+    # AFR
+    "YRI": "Yoruba (Nigeria)", "LWK": "Luhya (Kenya)", "GWD": "Gambian", "MSL": "Mende (Sierra Leone)",
+    "ESN": "Esan (Nigeria)", "ASW": "African-American (SW US)", "ACB": "African-Caribbean (Barbados)",
+    # AMR
+    "MXL": "Mexican-American", "PUR": "Puerto Rican", "CLM": "Colombian", "PEL": "Peruvian",
+}
 N_PCS = 10
+KNN_K = 50  # nearest reference neighbours for the fine-population breakdown
 
 
 def _ancestry_dir() -> Path:
@@ -140,26 +158,29 @@ def build_reference_model(maf: float = 0.05) -> Path:
     return md
 
 
-def _parse_sscore_pcs(path: Path) -> tuple[list[str], np.ndarray, list[str]]:
-    """Parse a PLINK2 .sscore — returns (IIDs, PC matrix from PC*_AVG cols, superpops if present)."""
+def _parse_sscore_pcs(path: Path) -> tuple[list[str], np.ndarray, list[str], list[str]]:
+    """Parse a PLINK2 .sscore — (IIDs, PC matrix from PC*_AVG cols, superpops, fine populations)."""
     with open(path) as fh:
         header = fh.readline().lstrip("#").rstrip("\n").split("\t")
         iidx = header.index("IID")
         avg = [header.index(f"PC{k}_AVG") for k in range(1, N_PCS + 1)]
         sp_idx = header.index("SuperPop") if "SuperPop" in header else None
-        iids, pcs, sps = [], [], []
+        pop_idx = header.index("Population") if "Population" in header else None
+        iids, pcs, sps, pops = [], [], [], []
         for line in fh:
             c = line.rstrip("\n").split("\t")
             iids.append(c[iidx])
             pcs.append([float(c[i]) for i in avg])
             sps.append(c[sp_idx] if sp_idx is not None else "NA")
-    return iids, np.array(pcs, dtype=float), sps
+            pops.append(c[pop_idx] if pop_idx is not None else "NA")
+    return iids, np.array(pcs, dtype=float), sps, pops
 
 
 def _cache_reference_pcs(md: Path) -> None:
-    """Cache reference projected PCs + superpopulation labels (from the refproj sscore)."""
-    iids, pcs, sps = _parse_sscore_pcs(md / "refproj.sscore")
-    np.savez(md / "ref_pcs.npz", iids=np.array(iids), pcs=pcs, superpop=np.array(sps))
+    """Cache reference projected PCs + superpopulation + fine-population labels (from refproj sscore)."""
+    iids, pcs, sps, pops = _parse_sscore_pcs(md / "refproj.sscore")
+    np.savez(md / "ref_pcs.npz", iids=np.array(iids), pcs=pcs,
+             superpop=np.array(sps), population=np.array(pops))
 
 
 def pruned_sites() -> list[tuple[str, int, str, str]]:
@@ -241,37 +262,52 @@ def project_sample(harmonized_vcf: Path) -> np.ndarray:
                "--score", str(md / "pca.eigenvec.allele"), "2", "5",
                "header-read", "variance-standardize",
                "--score-col-nums", f"6-{6 + N_PCS - 1}", "--out", str(out)])
-    _, pcs, _ = _parse_sscore_pcs(Path(str(out) + ".sscore"))
+    _, pcs, _, _ = _parse_sscore_pcs(Path(str(out) + ".sscore"))
     return pcs[0]
 
 
 # ── Ancestry assignment ─────────────────────────────────────────────────────────
 @dataclass
 class AncestryResult:
-    proportions: dict[str, float]   # superpop -> fraction (sums to 1)
-    nearest: str                    # nearest superpopulation code
+    proportions: dict[str, float]       # superpop -> fraction (continental rollup, sums to 1)
+    populations: dict[str, float]       # fine population code -> fraction (sub-continental, sums to 1)
+    nearest: str                        # nearest superpopulation code (for PRS calibration)
+    nearest_population: str             # nearest fine population code
     sample_pcs: list[float]
     ref_centroids: dict[str, list[float]]  # superpop -> [PC1, PC2] for plotting
 
 
-def assign_ancestry(sample_pcs: np.ndarray, k: int = 25) -> AncestryResult:
+def assign_ancestry(sample_pcs: np.ndarray, k: int = KNN_K) -> AncestryResult:
+    """Soft ancestry from the k nearest reference neighbours, at fine-population and continental levels.
+
+    Fine-population fractions are a k-NN estimate (sensitive to reference panel sizes — read as
+    'genetically closest to', not a calibrated admixture %). The continental rollup is robust.
+    """
     md = _model_dir()
     data = np.load(md / "ref_pcs.npz", allow_pickle=True)
-    ref_pcs, ref_sp = data["pcs"], data["superpop"]
+    ref_pcs, ref_sp, ref_pop = data["pcs"], data["superpop"], data["population"]
     d = np.linalg.norm(ref_pcs - sample_pcs[None, :], axis=1)
     nn = np.argsort(d)[:k]
-    sps, counts = np.unique(ref_sp[nn], return_counts=True)
+
+    populations: dict[str, float] = {}
+    for pop, c in zip(*np.unique(ref_pop[nn], return_counts=True), strict=False):
+        populations[str(pop)] = round(int(c) / k, 4)
+    populations = dict(sorted(populations.items(), key=lambda x: -x[1]))
+
     proportions = {sp: 0.0 for sp in SUPERPOPS}
-    for sp, c in zip(sps, counts, strict=False):
+    for sp, c in zip(*np.unique(ref_sp[nn], return_counts=True), strict=False):
         if sp in proportions:
-            proportions[sp] = round(c / k, 4)
+            proportions[sp] = round(int(c) / k, 4)
+
     nearest = max(proportions, key=proportions.get)
+    nearest_pop = next(iter(populations), "NA")
     centroids = {}
     for sp in SUPERPOPS:
         m = ref_sp == sp
         if m.any():
             centroids[sp] = [round(float(ref_pcs[m, 0].mean()), 4), round(float(ref_pcs[m, 1].mean()), 4)]
-    return AncestryResult(proportions, nearest, [round(float(x), 4) for x in sample_pcs], centroids)
+    return AncestryResult(proportions, populations, nearest, nearest_pop,
+                          [round(float(x), 4) for x in sample_pcs], centroids)
 
 
 def run() -> AncestryResult:
@@ -281,9 +317,12 @@ def run() -> AncestryResult:
     harmonized = harmonize_sample(settings.work_dir / "ancestry.harmonized.vcf.gz")
     pcs = project_sample(harmonized)
     res = assign_ancestry(pcs)
-    top = sorted(res.proportions.items(), key=lambda x: -x[1])
-    console.print("Estimated ancestry (nearest-neighbour over 1000 Genomes):")
-    for sp, frac in top:
+    console.print("Continental ancestry:")
+    for sp, frac in sorted(res.proportions.items(), key=lambda x: -x[1]):
         if frac > 0:
             console.print(f"  {SUPERPOPS[sp]:18} {frac:5.0%}")
+    console.print("Sub-continental (closest 1000 Genomes populations):")
+    for pop, frac in res.populations.items():
+        if frac > 0:
+            console.print(f"  {POPULATIONS.get(pop, pop):28} {frac:5.0%}")
     return res

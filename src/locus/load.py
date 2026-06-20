@@ -158,7 +158,7 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             drug VARCHAR, gene VARCHAR, source VARCHAR, recommendation VARCHAR, classification VARCHAR
         );
         CREATE TABLE IF NOT EXISTS ancestry_global(
-            superpop VARCHAR, name VARCHAR, proportion DOUBLE
+            level VARCHAR, code VARCHAR, name VARCHAR, proportion DOUBLE
         );
         CREATE TABLE IF NOT EXISTS ancestry_pca(
             label VARCHAR, pc1 DOUBLE, pc2 DOUBLE, is_sample BOOLEAN
@@ -167,27 +167,7 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             pgs_id VARCHAR, trait VARCHAR, raw DOUBLE, percentile DOUBLE,
             ancestry VARCHAR, n_used INTEGER, coverage DOUBLE
         );
-        CREATE TABLE IF NOT EXISTS ancestry_segments(
-            haplotype INTEGER, chrom VARCHAR, start BIGINT, "end" BIGINT,
-            ancestry VARCHAR, posterior DOUBLE
-        );
     """)
-
-
-def write_segments(segments: list) -> None:
-    """Write local-ancestry segments (chromosome painting) into the DuckDB store."""
-    import duckdb as _d
-
-    from .config import settings
-
-    con = _d.connect(str(settings.db_path))
-    try:
-        _create_schema(con)
-        con.execute("DELETE FROM ancestry_segments")
-        if segments:
-            con.executemany("INSERT INTO ancestry_segments VALUES (?,?,?,?,?,?)", segments)
-    finally:
-        con.close()
 
 
 def write_ancestry(ancestry_result, pgs_scores: list) -> None:
@@ -202,15 +182,18 @@ def write_ancestry(ancestry_result, pgs_scores: list) -> None:
 
     con = _d.connect(str(settings.db_path))
     try:
+        # Drop+recreate (tolerates schema changes), then repopulate.
+        for t in ("ancestry_global", "ancestry_pca", "pgs_scores"):
+            con.execute(f"DROP TABLE IF EXISTS {t}")
         _create_schema(con)
-        con.execute("DELETE FROM ancestry_global; DELETE FROM ancestry_pca; DELETE FROM pgs_scores")
         if ancestry_result is not None:
-            from .ancestry import SUPERPOPS
+            from .ancestry import POPULATIONS, SUPERPOPS
 
-            con.executemany("INSERT INTO ancestry_global VALUES (?,?,?)", [
-                (sp, SUPERPOPS.get(sp, sp), frac)
-                for sp, frac in ancestry_result.proportions.items() if frac > 0
-            ])
+            rows = [("continental", sp, SUPERPOPS.get(sp, sp), frac)
+                    for sp, frac in ancestry_result.proportions.items() if frac > 0]
+            rows += [("population", pop, POPULATIONS.get(pop, pop), frac)
+                     for pop, frac in ancestry_result.populations.items() if frac > 0]
+            con.executemany("INSERT INTO ancestry_global VALUES (?,?,?,?)", rows)
             rows = [("you", ancestry_result.sample_pcs[0], ancestry_result.sample_pcs[1], True)]
             for sp, (p1, p2) in ancestry_result.ref_centroids.items():
                 rows.append((sp, p1, p2, False))

@@ -242,7 +242,7 @@ def run_sql(sql: str, max_rows: int = 200) -> dict:
 
 
 class AncestryComponent(BaseModel):
-    superpop: str
+    code: str
     name: str
     proportion: float = Field(description="Fraction (0-1); k-NN estimate over 1000 Genomes")
 
@@ -255,11 +255,13 @@ class PcaPoint(BaseModel):
 
 
 class AncestrySummary(BaseModel):
-    components: list[AncestryComponent]
+    components: list[AncestryComponent]      # continental rollup
+    populations: list[AncestryComponent]     # sub-continental (fine 1000 Genomes populations)
     pca: list[PcaPoint]
     note: str = (
-        "Estimate from nearest-neighbour placement among 1000 Genomes populations. "
-        "Continental ancestry is reliable; finer/admixed breakdowns are approximate."
+        "k-NN placement among 1000 Genomes populations. Continental ancestry is robust; the "
+        "sub-continental breakdown is 'genetically closest to' (sensitive to reference panel sizes), "
+        "not a calibrated admixture percentage — and far coarser than 23andMe's proprietary panels."
     )
 
 
@@ -275,38 +277,20 @@ class PgsResult(BaseModel):
 
 def ancestry() -> AncestrySummary:
     with connect(read_only=True) as con:
-        comps = con.execute(
-            "SELECT superpop, name, proportion FROM ancestry_global ORDER BY proportion DESC"
+        cont = con.execute(
+            "SELECT code, name, proportion FROM ancestry_global WHERE level='continental' "
+            "ORDER BY proportion DESC"
+        ).fetchall()
+        pops = con.execute(
+            "SELECT code, name, proportion FROM ancestry_global WHERE level='population' "
+            "ORDER BY proportion DESC"
         ).fetchall()
         pca = con.execute("SELECT label, pc1, pc2, is_sample FROM ancestry_pca").fetchall()
     return AncestrySummary(
-        components=[AncestryComponent(superpop=c[0], name=c[1], proportion=c[2]) for c in comps],
+        components=[AncestryComponent(code=c[0], name=c[1], proportion=c[2]) for c in cont],
+        populations=[AncestryComponent(code=c[0], name=c[1], proportion=c[2]) for c in pops],
         pca=[PcaPoint(label=p[0], pc1=p[1], pc2=p[2], is_sample=p[3]) for p in pca],
     )
-
-
-class AncestrySegment(BaseModel):
-    haplotype: int
-    chrom: str
-    start: int
-    end: int
-    ancestry: str
-    posterior: float | None = None
-
-
-def ancestry_painting(chrom: str | None = None) -> list[AncestrySegment]:
-    """Local-ancestry segments (chromosome painting). Optionally restrict to one chromosome."""
-    where, params = ("TRUE", [])
-    if chrom:
-        c = chrom if chrom.startswith("chr") else f"chr{chrom}"
-        where, params = ("chrom = ?", [c])
-    with connect(read_only=True) as con:
-        rows = con.execute(
-            f'SELECT haplotype, chrom, start, "end", ancestry, posterior '
-            f"FROM ancestry_segments WHERE {where} ORDER BY chrom, start", params
-        ).fetchall()
-    return [AncestrySegment(haplotype=r[0], chrom=r[1], start=r[2], end=r[3], ancestry=r[4], posterior=r[5])
-            for r in rows]
 
 
 def polygenic_risk() -> list[PgsResult]:

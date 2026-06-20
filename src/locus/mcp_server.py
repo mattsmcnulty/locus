@@ -112,17 +112,6 @@ def ancestry() -> queries.AncestrySummary:
 
 
 @mcp.tool()
-def ancestry_painting(chrom: str = "") -> list[queries.AncestrySegment]:
-    """Local-ancestry chromosome painting: per-segment ancestry along each chromosome (haplotype 0/1).
-    Optionally restrict to one chromosome (e.g. 'chr1'). For a non-admixed genome this is largely
-    one ancestry throughout. Requires the local-ancestry step (`locus painting`) to have run."""
-    err = _require_db()
-    if err:
-        return {"error": err}  # type: ignore[return-value]
-    return queries.ancestry_painting(chrom or None)
-
-
-@mcp.tool()
 def polygenic_risk() -> list[queries.PgsResult]:
     """Polygenic (aggregate) risk scores for common traits (CAD, LDL, T2D, AFib, Lp(a)), reported as
     an ancestry-matched percentile where available. Percentiles are only meaningful within the matched

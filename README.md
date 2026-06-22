@@ -232,6 +232,20 @@ sub-continental bars + a population PCA scatter), **Risk** (polygenic percentile
 To work on the UI, run the Vite dev server for hot-reload (`make web-dev` on :5173, already
 CORS-allowed to call the API); otherwise `cd web && npm run build` and refresh.
 
+### Launch as a Mac app
+
+Prefer a Dock icon over a command? Build a native `Locus.app`:
+
+```bash
+scripts/build_macos_app.sh        # installs /Applications/Locus.app (DNA icon)
+```
+
+It's a tiny native Cocoa app (Swift) that starts `locus serve api`, opens the browser, shows in the
+Dock, and **stops the server when you Quit** (Cmd-Q / Dock → Quit). Double-click it, or drag it to the
+Dock. (`scripts/make_app_icon.py` renders the icon; `scripts/locus_app.swift` is the source; the `.app`
+itself is machine-local, not committed.) Prefer a terminal window with live logs instead? Use
+`scripts/locus-serve.command`.
+
 ## Configuration
 
 Paths are env-overridable (see `.env.example`, prefix `LOCUS_`). To keep the genome and the large

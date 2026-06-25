@@ -56,3 +56,6 @@ node_modules/
 pharmcat*.jar
 snpEff*.jar
 *.jar
+
+# Local agent guidance (kept on-disk, not published)
+CLAUDE.md

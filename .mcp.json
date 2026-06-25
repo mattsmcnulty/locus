@@ -3,7 +3,7 @@
     "locus": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "--directory", ".", "locus-mcp"]
+      "args": ["run", "locus-mcp"]
     }
   }
 }

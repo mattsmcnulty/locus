@@ -37,7 +37,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <dict>
   <key>CFBundleName</key><string>Locus</string>
   <key>CFBundleDisplayName</key><string>Locus</string>
-  <key>CFBundleIdentifier</key><string>com.mmcnulty.locus</string>
+  <key>CFBundleIdentifier</key><string>com.locus.app</string>
   <key>CFBundleVersion</key><string>1.0</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>

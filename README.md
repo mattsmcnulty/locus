@@ -295,6 +295,37 @@ uv run ruff check src tests scripts    # lint (line length 120)
 cd web && npm run build                # type-check + build the SPA
 ```
 
+## Privacy & data
+
+Your genetic data **stays on your Mac**. Everything under `data/` is `.gitignore`d and never
+committed; the MCP server and the web app bind to **localhost only**; nothing is uploaded. The
+`locus refresh` updater sends only *generic* queries to public databases (release dates, public
+database/score IDs, rsID lists, trait names) — **never your genotypes**.
+
+## Acknowledgments
+
+Locus stands on excellent open tools and databases. It **downloads these on your machine at
+runtime and never redistributes them** — please respect each source's license:
+
+- **Tools:** [bcftools/samtools/htslib](https://www.htslib.org), [PLINK2](https://www.cog-genomics.org/plink/2.0/)
+  (GPLv3), [SnpEff](https://pcingola.github.io/SnpEff/), [PharmCAT](https://pharmcat.org),
+  [Haplogrep](https://haplogrep.i-med.ac.at), [DuckDB](https://duckdb.org).
+- **Databases:** [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/) (NCBI, public domain),
+  [gnomAD](https://gnomad.broadinstitute.org), the [1000 Genomes Project](https://www.internationalgenome.org)
+  & [HGDP](https://www.internationalgenome.org/data-portal/data-collection/hgdp) reference panels,
+  the [PGS Catalog](https://www.pgscatalog.org), the [NHGRI-EBI GWAS Catalog](https://www.ebi.ac.uk/gwas/),
+  and [Phylotree](https://www.phylotree.org).
+- **AlphaMissense** (Google DeepMind): the predictions are licensed **CC-BY-NC 4.0 (non-commercial)**.
+  Locus uses them for personal/research interpretation only and does not redistribute them.
+
+Locus is an independent project — **not affiliated with or endorsed by** sequencing.com, Illumina,
+Anthropic, or any data provider.
+
+## License
+
+Locus's source code is released under the **MIT License** — see [LICENSE](LICENSE). The third-party
+tools and databases it downloads at runtime carry their own licenses (see Acknowledgments above).
+
 ## Disclaimer
 
 Locus is for personal exploration and education. It is **not** a medical device and its output is
@@ -302,4 +333,3 @@ Locus is for personal exploration and education. It is **not** a medical device 
 ancestry-matched reference; GWAS single-hit associations are weak and must not be summed; the
 HLA-B\*57:01 result is a screening proxy. Discuss any health-relevant finding with a qualified
 clinician or genetic counselor.
-```

@@ -1,6 +1,8 @@
 """``locus`` command-line interface.
 
+    locus setup       # one-command guided full install (for friends/family)
     locus doctor      # check toolchain + data are in place
+    locus mcp install # register the MCP server with Claude (Desktop + Code)
     locus ingest      # index, QC, normalize the sequencing.com VCFs
     locus annotate    # ClinVar / dbSNP / gnomAD / VEP / PharmCAT
     locus load        # build the DuckDB store
@@ -31,6 +33,8 @@ serve_app = typer.Typer(help="Run the query interfaces.", no_args_is_help=True)
 app.add_typer(serve_app, name="serve")
 schedule_app = typer.Typer(help="Schedule periodic `locus refresh` (macOS launchd).", no_args_is_help=True)
 app.add_typer(schedule_app, name="schedule")
+mcp_app = typer.Typer(help="Register the MCP server with Claude.", no_args_is_help=True)
+app.add_typer(mcp_app, name="mcp")
 
 console = Console()
 
@@ -94,37 +98,53 @@ def doctor() -> None:
         v = _tool_version(tool)
         table.add_row(f"{tool} (optional)", "[green]ok[/]" if v else "[yellow]absent[/]", v or "—")
 
-    # Data presence.
-    vcfs = sorted(settings.genome_dir.glob("*.vcf.gz")) if settings.genome_dir.exists() else []
-    table.add_row(
-        "genome VCFs",
-        "[green]ok[/]" if vcfs else "[yellow]none[/]",
-        f"{len(vcfs)} file(s) in {settings.genome_dir}" if vcfs else f"drop VCFs into {settings.genome_dir}",
-    )
+    from . import artifacts, download, mcp_install, vcfutils
 
-    # Annotation databases (the `locus download` targets).
-    from . import artifacts, download, shell
+    # Genome inputs + GRCh38 build sanity (the #1 silent failure is a non-GRCh38 file).
+    inputs = artifacts.classify_inputs(settings.genome_dir) if settings.genome_dir.exists() else None
+    if inputs and inputs.small_variants:
+        try:
+            build = vcfutils.detect_build(vcfutils.read_info(inputs.small_variants))
+        except Exception:  # noqa: BLE001 - best-effort
+            build = "unknown"
+        grch37 = build.startswith("GRCh37")
+        table.add_row(
+            "genome VCFs",
+            "[red]GRCh37?[/]" if grch37 else "[green]ok[/]",
+            f"{inputs.small_variants.name} (build {build})"
+            + ("  ← Locus needs GRCh38; re-export from sequencing.com" if grch37 else ""),
+        )
+    else:
+        table.add_row("genome VCFs", "[yellow]none[/]",
+                      f"drop your sequencing.com files into {settings.genome_dir}")
 
     def _db_row(label: str, present: bool, hint: str) -> None:
         table.add_row(label, "[green]ok[/]" if present else "[yellow]absent[/]", hint)
 
+    ann = settings.annotations_dir
     _db_row("reference FASTA", artifacts.find_reference() is not None, "locus download reference")
-    _db_row("ClinVar DB", (settings.annotations_dir / download.CLINVAR_CHR_VCF).exists(), "locus download clinvar")
-    _db_row("SnpEff", (settings.annotations_dir / "snpEff" / "snpEff.jar").exists(), "locus download snpeff")
+    _db_row("ClinVar", (ann / download.CLINVAR_CHR_VCF).exists(), "locus download clinvar")
+    _db_row("SnpEff", (ann / "snpEff" / "snpEff.jar").exists(), "locus download snpeff")
+    _db_row("AlphaMissense", (ann / "alphamissense" / "AlphaMissense_hg38.slim.tsv.bgz").exists(),
+            "locus download alphamissense")
+    _db_row("PharmCAT (native)", (artifacts.pharmcat_install_dir() / "pharmcat_pipeline").exists(),
+            "locus download pharmcat")
+    _db_row("ancestry panel",
+            (ann / "ancestry" / "all_hg38.pgen").exists() and (settings.data_dir / "tools" / "plink2").exists(),
+            "locus download ancestry")
+    _db_row("GWAS Catalog", (ann / "gwas" / "gwas-catalog-associations.tsv").exists(), "locus download gwas")
+    _db_row("Haplogrep (mtDNA)", (ann / "haplogrep" / "haplogrep.jar").exists(), "locus download haplogrep")
 
-    # Docker for PharmCAT: distinguish running vs installed-but-stopped vs absent.
-    docker_present = shutil.which("docker") is not None
-    if shell.docker_ready():
-        table.add_row("docker (PharmCAT)", "[green]ok[/]", "daemon running")
-    elif docker_present:
-        table.add_row("docker (PharmCAT)", "[yellow]stopped[/]", "start Docker Desktop, then `locus download pharmcat`")
-    else:
-        table.add_row("docker (PharmCAT)", "[yellow]absent[/]", "optional — only needed for pharmacogenomics")
+    # MCP registration with Claude.
+    reg = mcp_install.is_registered()
+    both = reg["desktop"] and reg["desktop_matches"] and reg["code"] and reg["code_matches"]
+    table.add_row("MCP (Claude)", "[green]ok[/]" if both else "[yellow]not registered[/]",
+                  "Desktop + Code" if both else "run `locus mcp install`")
 
     table.add_row(
         "DuckDB store",
         "[green]ok[/]" if settings.db_path.exists() else "[yellow]not built[/]",
-        str(settings.db_path) if settings.db_path.exists() else "run `locus pipeline`",
+        str(settings.db_path) if settings.db_path.exists() else "run `locus setup` (or `locus pipeline`)",
     )
     console.print(table)
 
@@ -143,7 +163,8 @@ def ingest(
 
 @app.command()
 def download(
-    target: str = typer.Argument("all", help="reference | clinvar | snpeff | pharmcat | all"),
+    target: str = typer.Argument(
+        "all", help="reference|clinvar|snpeff|pharmcat|alphamissense|ancestry|haplogrep|gwas|all"),
 ) -> None:
     """Download & prepare reference and annotation databases."""
     from . import download as _download
@@ -205,6 +226,19 @@ def gwas() -> None:
 
 
 @app.command()
+def setup(
+    skip_app: bool = typer.Option(False, "--skip-app", help="Don't build the macOS Dock app."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Don't pause at the genome-file step."),
+    skip_download: bool = typer.Option(False, "--skip-download", hidden=True),
+) -> None:
+    """Guided full install: download everything, build your genome store, register with Claude."""
+    from . import setup as _setup
+
+    settings.ensure_dirs()
+    _setup.run(skip_app=skip_app, assume_yes=yes, skip_download=skip_download)
+
+
+@app.command()
 def pipeline(
     normalize: bool = typer.Option(True, help="Normalize during ingest."),
     steps: str = typer.Option("all", help="Annotation steps to run."),
@@ -260,6 +294,23 @@ def schedule_status() -> None:
     from . import schedule as _schedule
 
     _schedule.status()
+
+
+@mcp_app.command("install")
+def mcp_install_cmd() -> None:
+    """Register the Locus MCP server with Claude Desktop and Claude Code (safe-merge + backup)."""
+    from . import mcp_install
+
+    settings.ensure_dirs()
+    mcp_install.run()
+
+
+@mcp_app.command("status")
+def mcp_status_cmd() -> None:
+    """Show whether the MCP server is registered with Claude (and points at this repo)."""
+    from . import mcp_install
+
+    mcp_install.status()
 
 
 @serve_app.command("mcp")

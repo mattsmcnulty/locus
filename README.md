@@ -70,6 +70,11 @@ and the JVM tools (SnpEff, PharmCAT, Haplogrep2) all run directly.
 
 ## Quickstart
 
+> **Just want it working (or setting it up for a non-developer)?** On an Apple Silicon Mac,
+> double-click **`setup.command`** (or run `./setup.sh`) — it installs everything, downloads the
+> databases, builds your genome store, and registers the MCP server with Claude. See
+> [docs/SETUP.md](docs/SETUP.md). The manual steps below are the same thing, broken out.
+
 ```bash
 # 1. System tools (bcftools, samtools, htslib, java) + uv
 make tools
@@ -80,7 +85,7 @@ make setup
 # 3. Put your sequencing.com VCFs in data/genome/, then check the environment
 make doctor
 
-# 4. Download & prepare the open-source databases (see the table below; `all` does the core set)
+# 4. Download & prepare the open-source databases (the table below; `all` fetches everything, ~9 GB)
 uv run locus download all
 
 # 5. Build the local genome database (ingest → annotate → load)
@@ -152,8 +157,8 @@ echo "alias locus='uv run --directory $(pwd) locus'" >> ~/.zshrc && source ~/.zs
 | `haplogrep` | Haplogrep2 jar (mtDNA haplogroups) | ~7 MB |
 | `gwas` | NHGRI-EBI GWAS Catalog associations TSV | ~65 MB |
 
-`locus download all` fetches the core set; the larger optional ones (`ancestry`, `alphamissense`,
-`gwas`) can be fetched individually when you want those features.
+`locus download all` fetches **everything** in the table (~9 GB, idempotent and resumable); you can
+also fetch any single target by name (e.g. `locus download ancestry`) if you only want some features.
 
 ## Querying with Claude (MCP)
 

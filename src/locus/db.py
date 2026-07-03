@@ -18,7 +18,8 @@ from .config import settings
 # Schema is versioned so we can detect/upgrade an old store.
 # v2: added sources + watch_seen_ids + watch_findings (the "living" refresh spine).
 # v3: traits + associations tables; ancestry_pca gained a `group` (continent) column.
-SCHEMA_VERSION = 3
+# v4: watch_findings gained a `url` column (clickable citations for PubMed/GWAS findings).
+SCHEMA_VERSION = 4
 
 
 @contextmanager

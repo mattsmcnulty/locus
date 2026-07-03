@@ -527,7 +527,7 @@ function ChangelogView() {
   if (loading) return <p>Loading…</p>;
   if (error) return <div className="banner error">{error}</div>;
   if (!data || data.total === 0)
-    return <p className="hint">Nothing new yet. Run <code>locus refresh</code> to check for newly-published findings (ClinVar reclassifications, new polygenic scores).</p>;
+    return <p className="hint">Nothing new yet. Run <code>locus refresh</code> to check for newly-published findings (ClinVar reclassifications, new GWAS associations at your variants, new PubMed papers on your genes).</p>;
   const order = ["strong", "moderate", "weak", "info"];
   return (
     <section>
@@ -546,6 +546,13 @@ function ChangelogView() {
                 {f.chrom ? `${f.chrom}:${f.pos?.toLocaleString()}` : f.source}
               </span>
               {f.detail && <span className="hint" style={{ flexBasis: "100%" }}>{f.detail}</span>}
+              {f.url && (
+                <span className="hint" style={{ flexBasis: "100%" }}>
+                  <a href={f.url} target="_blank" rel="noreferrer">
+                    {f.source === "pubmed" ? "PubMed" : f.source === "gwas" ? "GWAS Catalog / PubMed" : "source"} ↗
+                  </a>
+                </span>
+              )}
             </div>
           ))}
         </div>

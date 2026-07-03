@@ -54,11 +54,12 @@ class Finding:
     old_value: str | None = None
     new_value: str | None = None
     release: str | None = None
+    url: str | None = None       # citation / source link (PubMed, GWAS Catalog)
 
     def row(self, ts: str) -> tuple:
         return (ts, self.source, self.kind, self.tier, self.chrom, self.pos, self.ref,
                 self.alt, self.rsid, self.gene, self.title, self.detail,
-                self.old_value, self.new_value, self.release)
+                self.old_value, self.new_value, self.release, self.url)
 
 
 # ── HTTP probes (small, generic queries only) ──────────────────────────────────
@@ -82,6 +83,33 @@ def _http_json(url: str, timeout: int = 30):
     except Exception as e:  # noqa: BLE001
         console.print(f"[yellow]probe failed[/] {url}: {e}")
         return None
+
+
+def _http_stamp(url: str, timeout: int = 30) -> str | None:
+    """A cheap change-detector for a bulk file: its Last-Modified (or ETag) header."""
+    import httpx
+    try:
+        r = httpx.head(url, timeout=timeout, follow_redirects=True)
+        r.raise_for_status()
+        return r.headers.get("last-modified") or r.headers.get("etag")
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[yellow]probe failed[/] {url}: {e}")
+        return None
+
+
+def _days_ago_iso(days: int) -> str:
+    import datetime as _dt
+    return (_dt.datetime.now() - _dt.timedelta(days=days)).date().isoformat()
+
+
+def _seen_ids(source: str) -> set[str]:
+    """External IDs already processed for a source (dedup, e.g. PubMed PMIDs)."""
+    with connect(read_only=True) as con:
+        try:
+            return {i for (i,) in con.execute(
+                "SELECT external_id FROM watch_seen_ids WHERE source = ?", [source]).fetchall()}
+        except Exception:  # noqa: BLE001 - table may be absent
+            return set()
 
 
 # ── ClinVar classification helpers (pure; unit-testable) ────────────────────────
@@ -282,8 +310,144 @@ def _summarize_pgs(check: dict) -> list[Finding]:
                     release=check.get("version"))]
 
 
+# ── GWAS Catalog re-analysis (fully local; mirrors ClinVar reanalysis) ───────────
+def _snapshot_gwas() -> dict:
+    """Carried GWAS associations keyed by (rsid, mapped_trait)."""
+    snap: dict = {}
+    with connect(read_only=True) as con:
+        try:
+            rows = con.execute(
+                "SELECT rsid, mapped_trait, dosage, or_beta, pval, pmid, chrom, pos FROM associations"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - table absent until `locus gwas`/first re-analysis
+            rows = []
+    for rsid, mapped_trait, dosage, or_beta, pval, pmid, chrom, pos in rows:
+        snap[(rsid, mapped_trait)] = dict(dosage=dosage, or_beta=or_beta, pval=pval,
+                                          pmid=pmid, chrom=chrom, pos=pos)
+    return snap
+
+
+def classify_gwas_delta(prev: dict, cur: dict) -> list[Finding]:
+    """Newly-carried genome-wide-significant associations (keys in ``cur`` not in ``prev``).
+
+    Pure function — no I/O. Each is a WEAK single hit (surfaced as such), never to be summed.
+    """
+    findings: list[Finding] = []
+    for key, c in cur.items():
+        if key in prev:
+            continue
+        rsid, trait = key
+        pmid = c.get("pmid")
+        findings.append(Finding(
+            source="gwas", kind="new_association", tier="weak",
+            title=f"{rsid} ↔ {trait} — you carry {c.get('dosage')} risk allele(s)",
+            detail="New genome-wide-significant GWAS association at a variant you carry. WEAK single "
+                   "hit — do not sum with others or read it like a calibrated risk score.",
+            rsid=rsid, chrom=c.get("chrom"), pos=c.get("pos"),
+            new_value=c.get("or_beta"), release=pmid,
+            url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else None))
+    return findings
+
+
+def check_gwas(man: dict) -> dict | None:
+    """Probe the GWAS Catalog bulk file's Last-Modified/ETag. Returns {version, url, changed}."""
+    stamp = _http_stamp(download.GWAS_ASSOC_ZIP)
+    if not stamp:
+        return None
+    prev = manifest.get(man, "gwas_catalog")
+    return {"version": stamp, "url": download.GWAS_ASSOC_ZIP, "changed": stamp != prev.get("version")}
+
+
+def _reanalyze_gwas() -> list[Finding]:
+    """Snapshot carried associations → re-fetch the catalog → recompute → diff (new carried hits)."""
+    from . import gwas
+
+    console.print("[bold]GWAS re-analysis:[/] snapshotting carried associations…")
+    prev = _snapshot_gwas()
+    # Force a fresh catalog download (setup_gwas skips when the TSV is present).
+    (settings.annotations_dir / "gwas" / "gwas-catalog-associations.tsv").unlink(missing_ok=True)
+    tsv = download.setup_gwas()
+    console.print("Re-parsing GWAS Catalog (p < 5e-8 lead SNPs) + re-genotyping carried alleles…")
+    carried = gwas.compute(gwas.parse(tsv))
+    load.write_associations(carried)
+    cur = _snapshot_gwas()
+    if not prev:  # first time associations exist — record the baseline, don't flood
+        console.print(f"GWAS baseline recorded ({len(cur):,} carried associations).")
+        return []
+    findings = classify_gwas_delta(prev, cur)
+    console.print(f"GWAS re-analysis: {len(findings)} newly-carried association(s) "
+                  f"(prev {len(prev):,} → now {len(cur):,}).")
+    return findings
+
+
+# ── PubMed literature watcher (sends only gene symbols; genotypes never leave) ────
+def _watch_genes(cap: int = 40) -> list[str]:
+    """The genome's *notable* genes: ClinVar P/LP genes + PGx genes + ACMG-SF genes with a
+    predicted-damaging (AlphaMissense) variant. Bounds how many PubMed queries we make."""
+    from .panels import ACMG_SF_GENES
+
+    genes: set[str] = set()
+    with connect(read_only=True) as con:
+        def q(sql: str) -> list[str]:
+            try:
+                return [g for (g,) in con.execute(sql).fetchall() if g]
+            except Exception:  # noqa: BLE001
+                return []
+        genes.update(q(
+            "SELECT DISTINCT gene FROM variants WHERE gene IS NOT NULL "
+            "AND lower(clnsig) LIKE '%pathogenic%' AND lower(clnsig) NOT LIKE '%benign%' "
+            "AND lower(clnsig) NOT LIKE '%conflicting%'"))
+        genes.update(q("SELECT DISTINCT gene FROM pgx_genes"))
+        genes.update(g for g in q("SELECT DISTINCT gene FROM variants WHERE am_class LIKE '%pathogenic%'")
+                     if g in ACMG_SF_GENES)
+    return sorted(genes)[:cap]
+
+
+def check_pubmed(man: dict) -> dict | None:
+    """PubMed has no 'release' — we always look for papers published since we last checked."""
+    prev = manifest.get(man, "pubmed")
+    return {"version": manifest.now_iso(), "since": prev.get("last_checked"),
+            "first_run": not prev, "changed": True, "url": "https://pubmed.ncbi.nlm.nih.gov/"}
+
+
+def _pubmed_findings(check: dict) -> list[Finding]:
+    """Search PubMed for recent papers on the genome's notable genes; dedup against seen PMIDs.
+
+    On the first run we seed the seen-set from a bounded recent window but emit nothing (baseline),
+    so later runs surface only genuinely new papers. Mutates ``check['new_pmids']`` for mark_seen.
+    """
+    from . import literature
+
+    genes = _watch_genes()
+    check["new_pmids"] = []
+    if not genes:
+        return []
+    since = check.get("since") or _days_ago_iso(60)
+    seen = _seen_ids("pubmed")
+    first = check.get("first_run")
+    findings: list[Finding] = []
+    new_ids: list[str] = []
+    for gene in genes:
+        for h in literature.pubmed_search(
+                f"{gene}[Gene] AND (variant OR mutation OR polymorphism OR pathogenic OR clinical)",
+                mindate=since, retmax=5, gene=gene):
+            if h.pmid in seen or h.pmid in new_ids:
+                continue
+            new_ids.append(h.pmid)
+            if first:
+                continue  # baseline only — don't flood with a backlog on first run
+            snippet = (h.abstract[:300] + "…") if len(h.abstract) > 300 else h.abstract
+            findings.append(Finding(
+                source="pubmed", kind="new_study", tier="info", gene=gene,
+                title=f"New paper on {gene}: {h.title[:160]}",
+                detail=snippet or f"{h.journal} {h.year}".strip(),
+                release=h.year or None, url=h.url))
+    check["new_pmids"] = new_ids
+    return findings
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────────────────
-ALL_SOURCES = ["clinvar", "pgs", "cpic"]
+ALL_SOURCES = ["clinvar", "pgs", "cpic", "gwas", "pubmed"]
 
 
 def _write_report(findings: list[Finding], ts: str) -> Path | None:
@@ -308,7 +472,7 @@ def _write_report(findings: list[Finding], ts: str) -> Path | None:
 def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> list[Finding]:
     """Check each source, re-interpret what changed, and persist ranked findings.
 
-    sources: comma-separated subset of {clinvar, pgs} or "all".
+    sources: comma-separated subset of {clinvar, pgs, cpic, gwas, pubmed} or "all".
     dry_run: probe + report what *would* change; write nothing.
     force:   run the per-source work even if the version looks unchanged.
     """
@@ -320,6 +484,7 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
     findings: list[Finding] = []
     source_updates: list[tuple] = []  # (name, version, url, checksum, changed)
     pgs_new_ids: list[str] = []       # new PGS score IDs to mark seen
+    pubmed_new_ids: list[str] = []    # PubMed PMIDs to mark seen (dedup)
     cpic_versions: dict | None = None  # per-guideline versions to persist
 
     if "clinvar" in requested:
@@ -363,6 +528,35 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
             cpic_versions = chk["versions"]
             source_updates.append(("cpic", chk["version"], chk["url"], "", chk["changed"]))
 
+    if "gwas" in requested:
+        chk = check_gwas(man)
+        if chk is None:
+            console.print("[yellow]GWAS Catalog: probe failed — skipping.[/]")
+        else:
+            changed = chk["changed"] or force
+            state = "NEW" if chk["changed"] else ("unchanged, forced" if force else "unchanged")
+            console.print(f"GWAS Catalog: {str(chk['version'])[:32]} ({state})")
+            if changed and not dry_run:
+                findings += _reanalyze_gwas()
+            elif changed and dry_run:
+                findings.append(Finding(
+                    source="gwas", kind="update_available", tier="info",
+                    title="GWAS Catalog update available — run `locus refresh` to re-scan carried variants",
+                    new_value=str(chk["version"])[:32]))
+            source_updates.append(("gwas_catalog", chk["version"], chk["url"], "", chk["changed"]))
+
+    if "pubmed" in requested:
+        chk = check_pubmed(man)
+        if dry_run:
+            console.print("PubMed: [dim]dry-run — would search recent papers for your notable genes.[/]")
+        else:
+            pf = _pubmed_findings(chk)
+            findings += pf
+            pubmed_new_ids = chk.get("new_pmids", [])
+            tag = " (baseline seeded)" if chk.get("first_run") and pubmed_new_ids else ""
+            console.print(f"PubMed: {len(pf)} new paper finding(s){tag}")
+        source_updates.append(("pubmed", chk["version"], chk["url"], "", True))
+
     # Rank strongest-first for the printed digest.
     findings.sort(key=lambda f: TIER_ORDER.index(f.tier) if f.tier in TIER_ORDER else len(TIER_ORDER))
     _print_digest(findings, dry_run)
@@ -387,6 +581,8 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
         load.append_findings(con, [f.row(ts) for f in findings])
         # Mark new PGS IDs seen so Phase 2's suggest-only watcher can diff later.
         load.mark_seen(con, "pgs_catalog", pgs_new_ids)
+        # Mark PubMed PMIDs seen so we never re-surface the same paper.
+        load.mark_seen(con, "pubmed", pubmed_new_ids)
     report = _write_report(findings, ts)
     if report:
         console.print(f"[green]Wrote changelog[/] → {report}")

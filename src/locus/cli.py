@@ -257,15 +257,42 @@ def pipeline(
 
 @app.command()
 def refresh(
-    sources: str = typer.Option("all", help="Comma list: clinvar,pgs or 'all'."),
+    sources: str = typer.Option("all", help="Comma list: clinvar,pgs,cpic,gwas,pubmed or 'all'."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Probe + report what would change; write nothing."),
     force: bool = typer.Option(False, "--force", help="Run the per-source work even if versions look unchanged."),
 ) -> None:
-    """Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis)."""
+    """Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis,
+    new GWAS associations at your variants, and new PubMed papers on your genes)."""
     from . import refresh as _refresh
 
     settings.ensure_dirs()
     _refresh.run(sources=sources, dry_run=dry_run, force=force)
+
+
+@app.command()
+def literature(
+    query: str = typer.Argument(..., help="A gene ('BRCA2'), an rsID ('rs7903146'), or a PubMed ID."),
+    since: str = typer.Option("", help="Only papers on/after this ISO date (e.g. 2026-01-01)."),
+) -> None:
+    """Look up recent research: a gene/rsID → recent PubMed papers; a PubMed ID → which variants
+    that study reported that THIS genome carries. Sends only gene symbols / rsIDs — never genotypes."""
+    from . import literature as _lit
+
+    settings.ensure_dirs()
+    if query.strip().isdigit():  # a PubMed ID → paper → your variants
+        res = _lit.study_variants(query.strip())
+        console.print(f"[bold]PMID {res['pmid']}[/] — {res['total']} variant(s) reported, "
+                      f"you carry {res['carried']}.")
+        for m in res["markers"]:
+            mark = "●" if _lit._is_carried(m.get("genotype"), m.get("ref")) else "○"
+            console.print(f"  {mark} {m['rsid']} {m.get('genotype', '—')}"
+                          + (f"  ({m['gene']})" if m.get("gene") else ""))
+        console.print(f"[dim]{res['note']}[/]")
+        return
+    hits = _lit.literature_for(query, since=since or None)
+    console.print(f"[bold]{len(hits)} recent paper(s)[/] for '{query}':")
+    for h in hits:
+        console.print(f"  • [bold]{h.title}[/] — {h.journal} {h.year}  [dim]{h.url}[/]")
 
 
 @schedule_app.command("install")

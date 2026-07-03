@@ -284,9 +284,10 @@ def test_whats_new_query(genome):
 
     rows = [
         ("2026-06-01T00:00:00", "clinvar", "newly_pathogenic", "strong", "chr1", 100,
-         "A", "G", "rs1", "BRCA1", "strong one", "", "Benign", "Pathogenic", None),
-        ("2026-06-10T00:00:00", "pgs_catalog", "release", "info", None, None,
-         None, None, None, None, "info one", "", None, None, "2026-06"),
+         "A", "G", "rs1", "BRCA1", "strong one", "", "Benign", "Pathogenic", None, None),
+        ("2026-06-10T00:00:00", "pubmed", "new_study", "info", None, None,
+         None, None, None, "BRCA1", "info one", "abstract…", None, None, "2026",
+         "https://pubmed.ncbi.nlm.nih.gov/999/"),
     ]
     with connect(read_only=False) as con:
         load.append_findings(con, rows)
@@ -297,6 +298,9 @@ def test_whats_new_query(genome):
     assert wn.counts_by_tier == {"strong": 1, "info": 1}
     assert queries.whats_new(tier="strong").total == 1
     assert queries.whats_new(since="2026-06-05").total == 1  # only the info one
+    # v4 `url` column round-trips (clickable citation on PubMed/GWAS findings).
+    info = queries.whats_new(tier="info").findings[0]
+    assert info.url == "https://pubmed.ncbi.nlm.nih.gov/999/"
 
 
 def test_panels_integrity():
@@ -405,10 +409,125 @@ def test_refresh_dry_run_no_writes(genome, monkeypatch):
                         lambda m: {"version": "newmd5", "checksum": "newmd5", "url": "u", "changed": True})
     monkeypatch.setattr(refresh, "check_pgs",
                         lambda m: {"version": "2099-01-01", "url": "u", "n_new": 3, "ids": ["PGS1"], "changed": True})
+    # Keep the test hermetic: stub the network-touching checkers (CPIC/GWAS probe live APIs).
+    monkeypatch.setattr(refresh, "check_cpic", lambda m: None)
+    monkeypatch.setattr(refresh, "check_gwas",
+                        lambda m: {"version": "2099-01-01", "url": "u", "changed": True})
 
     findings = refresh.run(dry_run=True)
     kinds = {f.kind for f in findings}
     assert "release" in kinds                 # PGS summary
-    assert "update_available" in kinds        # ClinVar update flagged (reanalysis NOT run in dry-run)
+    assert "update_available" in kinds        # ClinVar + GWAS updates flagged (work NOT run in dry-run)
     assert not manifest.manifest_path().exists()   # nothing written
     assert not (settings.data_dir / "reports" / "whats_new.md").exists()
+
+
+def test_classify_gwas_delta():
+    """GWAS re-analysis diff surfaces only newly-carried (rsID, trait) associations, as weak hits
+    with a PubMed citation. Pure function — no I/O."""
+    from locus.refresh import classify_gwas_delta
+
+    def a(dosage, pmid, orb="1.2"):
+        return {"dosage": dosage, "pmid": pmid, "chrom": "chr7", "pos": 9, "or_beta": orb, "pval": 1e-12}
+
+    prev = {("rs1", "height"): a(1, "100")}
+    cur = {
+        ("rs1", "height"): a(1, "100"),                 # unchanged -> nothing
+        ("rs2", "type 2 diabetes"): a(2, "200"),        # newly carried -> one finding
+    }
+    out = classify_gwas_delta(prev, cur)
+    assert len(out) == 1
+    f = out[0]
+    assert f.rsid == "rs2" and f.kind == "new_association" and f.tier == "weak"
+    assert f.url == "https://pubmed.ncbi.nlm.nih.gov/200/"
+    assert "2 risk allele" in f.title
+    assert classify_gwas_delta(cur, cur) == []          # nothing new vs itself
+
+
+def test_is_carried_from_genotype():
+    """Carrier detection needs the reference allele to tell hom-alt from hom-ref."""
+    from locus.literature import _is_carried
+
+    assert _is_carried("A/G", "A") is True     # het
+    assert _is_carried("G/G", "A") is True     # hom-alt
+    assert _is_carried("A/A", "A") is False    # hom-ref
+    assert _is_carried("—", "A") is False      # not callable
+    assert _is_carried("A/G", None) is True    # het still detectable without ref
+    assert _is_carried("G/G", None) is False   # hom-alt indistinguishable from hom-ref w/o ref
+
+
+def test_literature_term_for():
+    from locus.literature import _term_for
+
+    assert _term_for("rs334") == "rs334"                      # rsID stays literal
+    assert _term_for("BRCA2").startswith("BRCA2[Gene]")       # bare symbol gets [Gene]
+    assert _term_for("breast cancer risk") == "breast cancer risk"  # free text passes through
+
+
+def test_pubmed_search_parses(monkeypatch):
+    """pubmed_search: esearch → PMIDs, efetch XML → hydrated PubMedHit (title/abstract/year)."""
+    from locus import literature
+
+    xml = (
+        '<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation>'
+        "<PMID>111</PMID><Article>"
+        "<ArticleTitle>BRCA1 and cancer risk</ArticleTitle>"
+        "<Abstract><AbstractText>We found a variant.</AbstractText></Abstract>"
+        "<Journal><Title>J Test</Title><JournalIssue><PubDate><Year>2026</Year>"
+        "</PubDate></JournalIssue></Journal></Article></MedlineCitation></PubmedArticle>"
+        "</PubmedArticleSet>"
+    )
+
+    def fake_eutils(endpoint, params, *, want_json):
+        return {"esearchresult": {"idlist": ["111"]}} if endpoint == "esearch.fcgi" else xml
+
+    monkeypatch.setattr(literature, "_eutils", fake_eutils)
+    hits = literature.pubmed_search("BRCA1[Gene]", gene="BRCA1")
+    assert len(hits) == 1
+    h = hits[0]
+    assert h.pmid == "111" and "cancer risk" in h.title
+    assert h.abstract == "We found a variant." and h.year == "2026" and h.gene == "BRCA1"
+    assert h.url == "https://pubmed.ncbi.nlm.nih.gov/111/"
+
+
+def test_study_rsids(monkeypatch):
+    """A PubMed ID → GWAS Catalog study → its reported rsIDs (regex-harvested, resilient)."""
+    from locus import literature
+
+    def fake_get(path_or_url):
+        if "findByPublicationIdPubmedId" in path_or_url:
+            return {"_embedded": {"studies": [
+                {"accessionId": "GCST1", "_links": {"associations": {"href": "http://x/assoc"}}}]}}
+        return {"_embedded": {"associations": [
+            {"loci": [{"strongestRiskAlleles": [{"riskAlleleName": "rs7903146-T"}]}]}]}}
+
+    monkeypatch.setattr(literature, "_gwas_get", fake_get)
+    assert literature.study_rsids("12345") == ["rs7903146"]
+
+
+def test_pubmed_findings_dedup(genome, monkeypatch):
+    """_pubmed_findings skips already-seen PMIDs, and on first run seeds the baseline silently."""
+    from locus import ingest, literature, load, refresh
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:  # a notable gene + one already-seen PMID
+        con.execute("INSERT INTO variants (chrom, pos, ref, alt, gene, clnsig) "
+                    "VALUES ('chr17', 43000000, 'A', 'G', 'BRCA1', 'Pathogenic')")
+        con.execute("CREATE TABLE IF NOT EXISTS watch_seen_ids(source VARCHAR, external_id VARCHAR)")
+        con.execute("INSERT INTO watch_seen_ids VALUES ('pubmed', 'SEEN1')")
+
+    hits = [literature.PubMedHit(pmid="SEEN1", title="old", gene="BRCA1"),
+            literature.PubMedHit(pmid="NEW1", title="new paper", abstract="A", gene="BRCA1")]
+    monkeypatch.setattr(literature, "pubmed_search", lambda *a, **k: hits)
+
+    check = {"since": "2026-01-01", "first_run": False}
+    findings = refresh._pubmed_findings(check)
+    assert [f.title for f in findings] == ["New paper on BRCA1: new paper"]
+    assert check["new_pmids"] == ["NEW1"]          # SEEN1 excluded, not re-marked
+
+    check2 = {"since": "2026-01-01", "first_run": True}
+    assert refresh._pubmed_findings(check2) == []  # baseline: emit nothing…
+    assert check2["new_pmids"] == ["NEW1"]         # …but still record the unseen PMID

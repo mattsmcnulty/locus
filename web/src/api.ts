@@ -101,6 +101,7 @@ export interface WatchFinding {
   old_value: string | null;
   new_value: string | null;
   release: string | null;
+  url: string | null;
 }
 export interface WhatsNew {
   total: number;

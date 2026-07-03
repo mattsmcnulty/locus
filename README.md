@@ -6,15 +6,16 @@ Locus turns the whole-genome sequencing files from [sequencing.com](https://sequ
 (or any Illumina/DRAGEN-style VCFs) into a fast local [DuckDB](https://duckdb.org) store,
 annotates them with open-source clinical, population, and pharmacogenomic databases, layers
 on deeper interpretation (ancestry, polygenic risk, traits, GWAS), and keeps re-interpreting
-your genome as new studies are published — all on your machine. It's exposed two ways:
+your genome as new studies are published — watching PubMed and the GWAS Catalog for papers about
+the variants *you* carry — all on your machine. It's exposed two ways:
 
 1. **An MCP server** so you can ask **Claude** questions about your genome in plain English.
 2. **A local debug SPA** (React) for browsing and visualizing the same data.
 
 > ⚠️ **This is sensitive personal genetic data.** Everything under `data/` is `.gitignore`d
 > and never committed. The MCP server and the SPA bind to **localhost only**, and the refresh
-> engine sends only *generic* queries outward (release dates, public score IDs, rsID lists) —
-> your genome never leaves the machine.
+> engine and literature lookups send only *generic* queries outward (release dates, public score
+> IDs, rsID lists, and gene symbols) — your genome never leaves the machine.
 
 ---
 
@@ -45,7 +46,8 @@ need the BAM/CRAM and are not yet implemented.)
 | **Traits & wellness** | Single-SNP traits (lactose, caffeine, alcohol flush, earwax, eye color, muscle type), the **HLA-B\*57:01** abacavir-hypersensitivity proxy, and your **mtDNA maternal haplogroup** |
 | **GWAS breadth** | Which genome-wide-significant (p<5e-8) risk alleles you carry, across the whole GWAS Catalog, queryable by trait |
 | **On-demand** | Paste a new paper's rsIDs and get your genotypes live (`ask_about`) |
-| **Living updates** | `locus refresh` re-interprets your genome as databases move — headlined by **ClinVar reanalysis** (variants you carry that were newly classified pathogenic) |
+| **Literature** | New **PubMed** papers on your notable genes and new **GWAS** associations at variants you carry, surfaced into the changelog; ask for the latest research (`literature_for`) or "which variants did this study find that I have?" (`variants_in_study`) |
+| **Living updates** | `locus refresh` re-interprets your genome as databases move — **ClinVar reanalysis** (variants you carry newly classified pathogenic), plus new GWAS associations and PubMed papers on your genes |
 
 ## Architecture
 
@@ -60,7 +62,7 @@ sequencing.com VCFs
       │  load      (cyvcf2 → Arrow → DuckDB)
       ▼
   locus.duckdb  ◄── ancestry/pgs · traits · gwas   (deeper interpretation; preserved across reloads)
-      │       ◄── refresh                          (re-interpret as ClinVar/PGS/CPIC publish)
+      │       ◄── refresh                          (re-interpret as ClinVar/GWAS/PubMed/PGS/CPIC publish)
       ├──►  MCP server   ──►  Claude
       └──►  FastAPI      ──►  React SPA
 ```
@@ -130,7 +132,8 @@ Run any command with `uv run locus <command>` (or activate the venv / add an ali
 | `locus ancestry` | Biogeographic ancestry (PCA + k-NN over 1000G + HGDP) + ancestry-calibrated polygenic risk |
 | `locus traits` | Genotype single-SNP traits/wellness + HLA-B\*57:01 proxy + mtDNA haplogroup |
 | `locus gwas` | Genotype GWAS Catalog risk alleles (p<5e-8) and store the ones you carry |
-| `locus refresh [--dry-run] [--force] [--sources clinvar,pgs,cpic]` | Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis, new PGS, CPIC updates) |
+| `locus literature <gene\|rsID\|PMID>` | Recent PubMed papers on a gene/rsID, or (for a PubMed ID) which variants that study reported that you carry |
+| `locus refresh [--dry-run] [--force] [--sources clinvar,pgs,cpic,gwas,pubmed]` | Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis, new PGS, CPIC updates, new GWAS associations at your variants, new PubMed papers on your genes) |
 | `locus schedule install [--weekday N] [--hour H]` | Install a weekly macOS launchd job that runs `locus refresh` |
 | `locus schedule status` / `locus schedule uninstall` | Show / remove the scheduled job |
 | `locus serve mcp` | Start the MCP server (stdio) — what Claude connects to |
@@ -172,12 +175,14 @@ clients dispatch them reliably):
 **Pharmacogenomics** — `pharmacogenomics` (PharmCAT diplotypes + CPIC/DPWG guidance)
 **Ancestry & risk** — `ancestry`, `polygenic_risk`
 **Traits & breadth** — `traits`, `gwas_associations`, `ask_about` (paste rsIDs or a trait)
+**Literature** — `literature_for` (recent PubMed on a gene/rsID/topic), `variants_in_study` (which of a paper's variants you carry)
 **Living updates** — `whats_new` (the ranked changelog from `locus refresh`)
 
 Then ask things like:
 - *"Do I carry any pathogenic ClinVar variants? Any ACMG secondary findings?"*
 - *"What's my CYP2C19 metabolizer status and which drugs does it affect?"*
 - *"What's my CAD polygenic risk percentile, and where do I fall in ancestry?"*
+- *"What's the latest research on my BRCA2, and does this new paper (PMID …) report variants I carry?"*
 - *"What's my mtDNA haplogroup? Am I lactose-persistent? Can I take abacavir?"*
 - *"What GWAS associations do I carry for type 2 diabetes?"*
 - *"Check rs429358 and rs7412"* (APOE) — or paste any rsIDs from a new paper.
@@ -213,9 +218,15 @@ Your genome is sequenced once and static; the *interpretation databases* move ev
 only what changed, and writes a ranked "what's new since last run" changelog (the `whats_new` MCP
 tool, the SPA **Changelog** tab, and `data/reports/whats_new.md`).
 
-- **ClinVar reanalysis** (headline) — snapshots your current classifications, fetches the new ClinVar,
+- **ClinVar reanalysis** — snapshots your current classifications, fetches the new ClinVar,
   re-annotates + reloads, and surfaces variants you carry that became (or stopped being) pathogenic,
   tiered by ClinVar review status.
+- **PubMed literature** — searches recent papers on your *notable* genes (ones you carry pathogenic,
+  pharmacogenomic, or predicted-damaging variants in) and drops new ones into the changelog with a
+  clickable citation. Sends only gene symbols; deduped so a paper never surfaces twice.
+- **GWAS Catalog** — when a new catalog release lands, re-scans the variants you carry and flags
+  newly-published genome-wide-significant associations (weak single hits, not a calibrated score).
+  Fully local — nothing variant-specific leaves the machine.
 - **PGS Catalog** — reports newly published scores (suggest-only; you add relevant IDs to track).
 - **CPIC** — flags pharmacogenomic guideline updates touching genes you carry.
 
@@ -299,8 +310,10 @@ cd web && npm run build                # type-check + build the SPA
 
 Your genetic data **stays on your Mac**. Everything under `data/` is `.gitignore`d and never
 committed; the MCP server and the web app bind to **localhost only**; nothing is uploaded. The
-`locus refresh` updater sends only *generic* queries to public databases (release dates, public
-database/score IDs, rsID lists, trait names) — **never your genotypes**.
+`locus refresh` updater and the literature/`ask_about` lookups send only *generic* queries to
+public databases — release dates, public database/score IDs, **rsID lists, and gene symbols**
+(to NCBI PubMed, the GWAS Catalog, and Ensembl). Your **genotypes never leave the machine**; all
+matching against your genome is done locally.
 
 ## Acknowledgments
 

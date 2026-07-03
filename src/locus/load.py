@@ -182,7 +182,7 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             ts VARCHAR, source VARCHAR, kind VARCHAR, tier VARCHAR,
             chrom VARCHAR, pos BIGINT, ref VARCHAR, alt VARCHAR, rsid VARCHAR, gene VARCHAR,
             title VARCHAR, detail VARCHAR, old_value VARCHAR, new_value VARCHAR,
-            release VARCHAR
+            release VARCHAR, url VARCHAR
         );
         -- Single-SNP traits / wellness + HLA proxy (preserved across a variant reload).
         CREATE TABLE IF NOT EXISTS traits(
@@ -296,14 +296,16 @@ def upsert_source(con: duckdb.DuckDBPyConnection, name: str, *, version: str, ur
 def append_findings(con: duckdb.DuckDBPyConnection, rows: list[tuple]) -> int:
     """Append ``watch_findings`` rows. Each row matches the watch_findings column order:
     (ts, source, kind, tier, chrom, pos, ref, alt, rsid, gene, title, detail,
-    old_value, new_value, release)."""
+    old_value, new_value, release, url)."""
     if not rows:
         return 0
     con.execute("CREATE TABLE IF NOT EXISTS watch_findings(ts VARCHAR, source VARCHAR, kind VARCHAR, "
                 "tier VARCHAR, chrom VARCHAR, pos BIGINT, ref VARCHAR, alt VARCHAR, rsid VARCHAR, "
                 "gene VARCHAR, title VARCHAR, detail VARCHAR, old_value VARCHAR, new_value VARCHAR, "
-                "release VARCHAR)")
-    con.executemany("INSERT INTO watch_findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                "release VARCHAR, url VARCHAR)")
+    # Migrate a pre-v4 store in place so old changelog history is preserved.
+    con.execute("ALTER TABLE watch_findings ADD COLUMN IF NOT EXISTS url VARCHAR")
+    con.executemany("INSERT INTO watch_findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     return len(rows)
 
 

@@ -343,6 +343,7 @@ class WatchFinding(BaseModel):
     old_value: str | None = Field(default=None, description="Prior classification/value")
     new_value: str | None = Field(default=None, description="New classification/value")
     release: str | None = None
+    url: str | None = Field(default=None, description="Citation / source link (e.g. PubMed, GWAS Catalog)")
 
 
 class WhatsNew(BaseModel):
@@ -357,7 +358,7 @@ class WhatsNew(BaseModel):
 
 
 _WATCH_COLS = ("ts", "source", "kind", "tier", "chrom", "pos", "rsid", "gene",
-               "title", "detail", "old_value", "new_value", "release")
+               "title", "detail", "old_value", "new_value", "release", "url")
 
 
 def whats_new(since: str | None = None, tier: str | None = None, limit: int = 200) -> WhatsNew:
@@ -371,6 +372,11 @@ def whats_new(since: str | None = None, tier: str | None = None, limit: int = 20
         ).fetchone()[0]
         if not exists:
             return WhatsNew(total=0, since=since, counts_by_tier={}, findings=[])
+        # `url` may be absent on a pre-v4 store we can't ALTER from a read-only connection.
+        have = {c for (c,) in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'watch_findings'"
+        ).fetchall()}
+        cols = tuple(c for c in _WATCH_COLS if c in have)
         where, params = ["TRUE"], []
         if since:
             where.append("ts >= ?")
@@ -383,13 +389,12 @@ def whats_new(since: str | None = None, tier: str | None = None, limit: int = 20
         counts = dict(con.execute(
             f"SELECT tier, count(*) FROM watch_findings WHERE {clause} GROUP BY tier", params
         ).fetchall())
-        cols = ", ".join(_WATCH_COLS)
         rank = "CASE tier WHEN 'strong' THEN 0 WHEN 'moderate' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END"
         rows = con.execute(
-            f"SELECT {cols} FROM watch_findings WHERE {clause} ORDER BY {rank}, ts DESC LIMIT ?",
+            f"SELECT {', '.join(cols)} FROM watch_findings WHERE {clause} ORDER BY {rank}, ts DESC LIMIT ?",
             [*params, limit],
         ).fetchall()
-    findings = [WatchFinding(**dict(zip(_WATCH_COLS, r, strict=True))) for r in rows]
+    findings = [WatchFinding(**dict(zip(cols, r, strict=True))) for r in rows]
     return WhatsNew(total=total, since=since, counts_by_tier=counts, findings=findings)
 
 
@@ -490,6 +495,7 @@ class MarkerGenotype(BaseModel):
     chrom: str
     pos: int
     genotype: str = Field(description="Observed genotype, e.g. 'A/G'; '—' if not callable")
+    ref: str | None = Field(default=None, description="Reference allele (to tell hom-alt from hom-ref)")
     gene: str | None = None
     clnsig: str | None = None
     am_class: str | None = None

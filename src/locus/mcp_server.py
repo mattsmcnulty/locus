@@ -35,6 +35,31 @@ class StructuralVariantsResult(BaseModel):
     hits: list[queries.StructuralHit]
 
 
+class LiteratureHit(BaseModel):
+    pmid: str
+    title: str
+    abstract: str = ""
+    journal: str = ""
+    year: str = ""
+    gene: str = ""
+    url: str = Field(description="PubMed link")
+
+
+class LiteratureResult(BaseModel):
+    query: str
+    total: int
+    hits: list[LiteratureHit]
+    note: str
+
+
+class StudyVariantsResult(BaseModel):
+    pmid: str
+    total: int = Field(description="Variants the study reported")
+    carried: int = Field(description="How many this genome carries a non-reference allele at")
+    markers: list[queries.MarkerGenotype]
+    note: str
+
+
 def _require_db() -> str | None:
     if not db_exists():
         return "No Locus database found. Build it first with `locus pipeline`."
@@ -216,6 +241,48 @@ def ask_about(query: str, limit: int = 50) -> queries.AskResult:
     note = page.note if page.hits else ("No carried GWAS associations for that trait. Run `locus gwas` "
                                         "first, or pass rsIDs to genotype specific variants.")
     return queries.AskResult(query=query, mode="trait", markers=[], associations=page.hits, note=note)
+
+
+@mcp.tool()
+def literature_for(query: str, since: str = "") -> LiteratureResult:
+    """Latest PubMed research on a gene ('BRCA2'), an rsID ('rs7903146'), or a topic, to read in
+    the context of THIS genome. Returns raw paper titles + abstracts + PubMed links for you to
+    summarize and relate to the person's variants — it does NOT itself filter by genotype. Optionally
+    pass `since` (ISO date like '2026-01-01') to limit to recent papers. Informational, not diagnostic."""
+    import contextlib
+    import sys
+
+    from . import literature
+
+    # pubmed_search logs to stdout; keep it off the stdio JSON-RPC stream.
+    with contextlib.redirect_stdout(sys.stderr):
+        raw = literature.literature_for(query, since=since or None)
+    hits = [LiteratureHit(pmid=h.pmid, title=h.title, abstract=h.abstract, journal=h.journal,
+                          year=h.year, gene=h.gene, url=h.url) for h in raw]
+    note = ("Recent PubMed papers matching the query. Summarize them against the genome's other "
+            "findings; single papers are not clinical guidance." if hits
+            else "No PubMed papers found (or the lookup failed). Try a broader query or drop `since`.")
+    return LiteratureResult(query=query, total=len(hits), hits=hits, note=note)
+
+
+@mcp.tool()
+def variants_in_study(pmid: str) -> StudyVariantsResult:
+    """Given the PubMed ID of a GWAS study, pull the variants it reported (via the GWAS Catalog) and
+    show which ones THIS genome carries — live, hom-ref-aware genotyping. Answers 'this new paper
+    found N variants, which do I have?'. Weak single-variant evidence — informational, not diagnostic."""
+    err = _require_db()
+    if err:
+        return StudyVariantsResult(pmid=pmid, total=0, carried=0, markers=[], note=err)
+    import contextlib
+    import sys
+
+    from . import literature
+
+    with contextlib.redirect_stdout(sys.stderr):
+        res = literature.study_variants(pmid)
+    markers = [queries.MarkerGenotype(**m) for m in res["markers"]]
+    return StudyVariantsResult(pmid=pmid, total=res["total"], carried=res["carried"],
+                               markers=markers, note=res["note"])
 
 
 @mcp.tool()

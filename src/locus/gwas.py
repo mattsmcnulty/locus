@@ -208,13 +208,13 @@ def ask_markers(rsids: list[str]) -> list[dict]:
     for rsid, (chrom, p) in pos.items():
         hit = calls.get((chrom, p))
         if hit is None:
-            gtstr = "—"
+            gtstr, ref = "—", None
         else:
             ref, alts, gt = hit
             alleles = [ref, *list(alts)]
             gtstr = "/".join(alleles[i] if 0 <= i < len(alleles) else "." for i in gt[:2])
         gene, clnsig, am = ann.get(rsid, (None, None, None))
-        results.append({"rsid": rsid, "chrom": chrom, "pos": p, "genotype": gtstr,
+        results.append({"rsid": rsid, "chrom": chrom, "pos": p, "genotype": gtstr, "ref": ref,
                         "gene": gene, "clnsig": clnsig, "am_class": am})
     return results
 

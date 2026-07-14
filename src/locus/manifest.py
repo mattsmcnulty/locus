@@ -31,6 +31,7 @@ LICENSES = {
     "pgs_catalog": "open (PGS Catalog, EBI)",
     "gwas_catalog": "open (NHGRI-EBI GWAS Catalog)",
     "pubmed": "public-domain (NCBI PubMed metadata)",
+    "litvar": "public-domain (NCBI LitVar2 metadata)",
     "alphamissense": "CC-BY-NC 4.0",
     "gnomad": "open (gnomAD)",
 }

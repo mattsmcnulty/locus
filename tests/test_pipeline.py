@@ -531,3 +531,42 @@ def test_pubmed_findings_dedup(genome, monkeypatch):
     check2 = {"since": "2026-01-01", "first_run": True}
     assert refresh._pubmed_findings(check2) == []  # baseline: emit nothing…
     assert check2["new_pmids"] == ["NEW1"]         # …but still record the unseen PMID
+
+
+def test_litvar_pmids(monkeypatch):
+    """LitVar2 rsID→PMIDs: keep the newest (highest) PMIDs, capped; reject non-rs ids."""
+    from locus import literature
+
+    monkeypatch.setattr(literature, "_litvar_get",
+                        lambda path: {"pmids": [100, 300, 200, 50], "pmids_count": 4})
+    assert literature.litvar_pmids("rs1800896", recent=2) == ["300", "200"]  # newest first, capped
+    assert literature.litvar_pmids("notanrs") == []                          # non-rs id rejected
+
+
+def test_litvar_findings_dedup(genome, monkeypatch):
+    """Variant-level watcher: new papers about a specific rsID you carry, deduped; baseline silent."""
+    from locus import ingest, literature, load, refresh
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:  # a clinically-notable rsID + one already-seen PMID
+        con.execute("INSERT INTO variants (chrom,pos,ref,alt,rsid,gene,clnsig) "
+                    "VALUES ('chr2', 47000000, 'A','G','rs777','MSH2','Pathogenic')")
+        con.execute("CREATE TABLE IF NOT EXISTS watch_seen_ids(source VARCHAR, external_id VARCHAR)")
+        con.execute("INSERT INTO watch_seen_ids VALUES ('litvar','SEEN9')")
+
+    monkeypatch.setattr(literature, "litvar_pmids", lambda rsid, **k: ["SEEN9", "NEW9"])
+    monkeypatch.setattr(literature, "fetch_pubmed_meta",
+                        lambda pmids: {"NEW9": literature.PubMedHit(pmid="NEW9", title="fresh finding", abstract="B")})
+
+    check = {"first_run": False}
+    f = refresh._litvar_findings(check)
+    assert [x.rsid for x in f] == ["rs777"]
+    assert "MSH2" in f[0].title and f[0].url.endswith("/NEW9/")
+    assert check["new_pmids"] == ["NEW9"]           # SEEN9 excluded
+
+    check2 = {"first_run": True}
+    assert refresh._litvar_findings(check2) == []   # baseline: silent
+    assert check2["new_pmids"] == ["NEW9"]

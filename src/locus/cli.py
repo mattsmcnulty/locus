@@ -257,7 +257,7 @@ def pipeline(
 
 @app.command()
 def refresh(
-    sources: str = typer.Option("all", help="Comma list: clinvar,pgs,cpic,gwas,pubmed or 'all'."),
+    sources: str = typer.Option("all", help="Comma list: clinvar,pgs,cpic,gwas,pubmed,litvar or 'all'."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Probe + report what would change; write nothing."),
     force: bool = typer.Option(False, "--force", help="Run the per-source work even if versions look unchanged."),
 ) -> None:

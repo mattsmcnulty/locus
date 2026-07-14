@@ -381,26 +381,29 @@ def _reanalyze_gwas() -> list[Finding]:
 
 
 # ── PubMed literature watcher (sends only gene symbols; genotypes never leave) ────
-def _watch_genes(cap: int = 40) -> list[str]:
-    """The genome's *notable* genes: ClinVar P/LP genes + PGx genes + ACMG-SF genes with a
-    predicted-damaging (AlphaMissense) variant. Bounds how many PubMed queries we make."""
-    from .panels import ACMG_SF_GENES
-
-    genes: set[str] = set()
+def _watch_genes(cap: int = 200) -> list[str]:
+    """The genome's notable genes for the gene-level PubMed sweep, most-actionable first:
+    ClinVar P/LP genes, then PharmCAT PGx genes, then any gene with an AlphaMissense-predicted-
+    damaging variant. Priority-ordered so the cap (a safety bound) drops the weakest signal first."""
     with connect(read_only=True) as con:
         def q(sql: str) -> list[str]:
             try:
                 return [g for (g,) in con.execute(sql).fetchall() if g]
             except Exception:  # noqa: BLE001
                 return []
-        genes.update(q(
-            "SELECT DISTINCT gene FROM variants WHERE gene IS NOT NULL "
-            "AND lower(clnsig) LIKE '%pathogenic%' AND lower(clnsig) NOT LIKE '%benign%' "
-            "AND lower(clnsig) NOT LIKE '%conflicting%'"))
-        genes.update(q("SELECT DISTINCT gene FROM pgx_genes"))
-        genes.update(g for g in q("SELECT DISTINCT gene FROM variants WHERE am_class LIKE '%pathogenic%'")
-                     if g in ACMG_SF_GENES)
-    return sorted(genes)[:cap]
+        plp = q("SELECT DISTINCT gene FROM variants WHERE gene IS NOT NULL "
+                "AND lower(clnsig) LIKE '%pathogenic%' AND lower(clnsig) NOT LIKE '%benign%' "
+                "AND lower(clnsig) NOT LIKE '%conflicting%'")
+        pgx = q("SELECT DISTINCT gene FROM pgx_genes")
+        amd = q("SELECT DISTINCT gene FROM variants WHERE am_class LIKE '%pathogenic%'")
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for group in (sorted(set(plp)), sorted(set(pgx)), sorted(set(amd))):
+        for g in group:
+            if g not in seen:
+                seen.add(g)
+                ordered.append(g)
+    return ordered[:cap]
 
 
 def check_pubmed(man: dict) -> dict | None:
@@ -446,8 +449,87 @@ def _pubmed_findings(check: dict) -> list[Finding]:
     return findings
 
 
+# ── LitVar2 variant watcher (papers about the specific variants you carry) ────────
+def _litvar_variants(cap: int = 800) -> list[tuple[str, str | None]]:
+    """The clinically-notable rsIDs to watch for new papers: anything ClinVar hasn't called plainly
+    benign (P/LP, VUS/conflicting, risk/drug-response/protective/association), most-actionable first.
+    Variant-centric — far higher signal than gene-level free-text, and it scales like ClinVar/GWAS."""
+    with connect(read_only=True) as con:
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT rsid, gene, clnsig FROM variants "
+                "WHERE rsid IS NOT NULL AND clnsig IS NOT NULL AND lower(clnsig) NOT LIKE '%benign%' "
+                "AND (lower(clnsig) LIKE '%pathogenic%' OR lower(clnsig) LIKE '%uncertain%' "
+                "  OR lower(clnsig) LIKE '%conflicting%' OR lower(clnsig) LIKE '%risk%' "
+                "  OR lower(clnsig) LIKE '%drug_response%' OR lower(clnsig) LIKE '%protective%' "
+                "  OR lower(clnsig) LIKE '%association%')"
+            ).fetchall()
+        except Exception:  # noqa: BLE001
+            rows = []
+
+    def rank(clnsig: str | None) -> int:
+        s = (clnsig or "").lower()
+        if "pathogenic" in s and "conflicting" not in s:
+            return 0
+        if "conflicting" in s or "uncertain" in s:
+            return 1
+        return 2  # risk_factor / drug_response / protective / association
+
+    rows.sort(key=lambda r: rank(r[2]))
+    out: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    for rsid, gene, _ in rows:
+        if rsid not in seen:
+            seen.add(rsid)
+            out.append((rsid, gene))
+    return out[:cap]
+
+
+def check_litvar(man: dict) -> dict:
+    """LitVar has no 'release' — novelty is handled by the seen-PMID dedup, like PubMed."""
+    prev = manifest.get(man, "litvar")
+    return {"version": manifest.now_iso(), "first_run": not prev, "changed": True,
+            "url": "https://www.ncbi.nlm.nih.gov/research/litvar2/"}
+
+
+def _litvar_findings(check: dict) -> list[Finding]:
+    """New papers about the specific variants you carry (LitVar2 rsID→literature), deduped by PMID.
+
+    First run seeds the baseline silently. Mutates ``check['new_pmids']`` for mark_seen."""
+    from . import literature
+
+    variants = _litvar_variants()
+    check["new_pmids"] = []
+    if not variants:
+        return []
+    seen = _seen_ids("litvar")
+    first = check.get("first_run")
+    new: dict[str, tuple[str, str | None]] = {}  # pmid -> (rsid, gene)
+    for rsid, gene in variants:
+        for pmid in literature.litvar_pmids(rsid):
+            if pmid in seen or pmid in new:
+                continue
+            new[pmid] = (rsid, gene)
+    check["new_pmids"] = list(new)
+    if first or not new:
+        return []  # baseline: record the seen-set, emit nothing
+    meta = literature.fetch_pubmed_meta(list(new))
+    findings: list[Finding] = []
+    for pmid, (rsid, gene) in new.items():
+        h = meta.get(pmid)
+        title = (h.title if h else "") or "(title unavailable)"
+        snippet = ((h.abstract[:300] + "…") if h and len(h.abstract) > 300 else (h.abstract if h else "")) \
+            or f"New paper mentioning {rsid}."
+        label = rsid + (f" ({gene})" if gene else "")
+        findings.append(Finding(
+            source="litvar", kind="new_study", tier="info", gene=gene, rsid=rsid,
+            title=f"New paper on {label}: {title[:150]}", detail=snippet,
+            url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"))
+    return findings
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────────────────
-ALL_SOURCES = ["clinvar", "pgs", "cpic", "gwas", "pubmed"]
+ALL_SOURCES = ["clinvar", "pgs", "cpic", "gwas", "pubmed", "litvar"]
 
 
 def _write_report(findings: list[Finding], ts: str) -> Path | None:
@@ -472,7 +554,7 @@ def _write_report(findings: list[Finding], ts: str) -> Path | None:
 def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> list[Finding]:
     """Check each source, re-interpret what changed, and persist ranked findings.
 
-    sources: comma-separated subset of {clinvar, pgs, cpic, gwas, pubmed} or "all".
+    sources: comma-separated subset of {clinvar, pgs, cpic, gwas, pubmed, litvar} or "all".
     dry_run: probe + report what *would* change; write nothing.
     force:   run the per-source work even if the version looks unchanged.
     """
@@ -485,6 +567,7 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
     source_updates: list[tuple] = []  # (name, version, url, checksum, changed)
     pgs_new_ids: list[str] = []       # new PGS score IDs to mark seen
     pubmed_new_ids: list[str] = []    # PubMed PMIDs to mark seen (dedup)
+    litvar_new_ids: list[str] = []    # LitVar PMIDs to mark seen (dedup)
     cpic_versions: dict | None = None  # per-guideline versions to persist
 
     if "clinvar" in requested:
@@ -557,6 +640,18 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
             console.print(f"PubMed: {len(pf)} new paper finding(s){tag}")
         source_updates.append(("pubmed", chk["version"], chk["url"], "", True))
 
+    if "litvar" in requested:
+        chk = check_litvar(man)
+        if dry_run:
+            console.print("LitVar: [dim]dry-run — would scan the literature for the variants you carry.[/]")
+        else:
+            lf = _litvar_findings(chk)
+            findings += lf
+            litvar_new_ids = chk.get("new_pmids", [])
+            tag = " (baseline seeded)" if chk.get("first_run") and litvar_new_ids else ""
+            console.print(f"LitVar: {len(lf)} new variant-paper finding(s){tag}")
+        source_updates.append(("litvar", chk["version"], chk["url"], "", True))
+
     # Rank strongest-first for the printed digest.
     findings.sort(key=lambda f: TIER_ORDER.index(f.tier) if f.tier in TIER_ORDER else len(TIER_ORDER))
     _print_digest(findings, dry_run)
@@ -581,8 +676,9 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
         load.append_findings(con, [f.row(ts) for f in findings])
         # Mark new PGS IDs seen so Phase 2's suggest-only watcher can diff later.
         load.mark_seen(con, "pgs_catalog", pgs_new_ids)
-        # Mark PubMed PMIDs seen so we never re-surface the same paper.
+        # Mark PubMed + LitVar PMIDs seen so we never re-surface the same paper.
         load.mark_seen(con, "pubmed", pubmed_new_ids)
+        load.mark_seen(con, "litvar", litvar_new_ids)
     report = _write_report(findings, ts)
     if report:
         console.print(f"[green]Wrote changelog[/] → {report}")

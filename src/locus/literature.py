@@ -159,6 +159,51 @@ def literature_for(query: str, *, since: str | None = None, retmax: int = 20) ->
     return pubmed_search(_term_for(query), mindate=since, retmax=retmax, gene=gene)
 
 
+def fetch_pubmed_meta(pmids: list[str]) -> dict[str, PubMedHit]:
+    """Hydrate a batch of PMIDs into PubMedHits (title + abstract) via efetch → {pmid: hit}."""
+    pmids = [p for p in pmids if p]
+    if not pmids:
+        return {}
+    xml_text = _eutils("efetch.fcgi", {"db": "pubmed", "id": ",".join(pmids),
+                                       "retmode": "xml", "rettype": "abstract"}, want_json=False)
+    return {h.pmid: h for h in (_parse_pubmed_xml(xml_text) if xml_text else [])}
+
+
+# ── LitVar2 — variant-centric literature (papers about a specific rsID) ───────────
+_LITVAR = "https://www.ncbi.nlm.nih.gov/research/litvar2-api"
+
+
+def _litvar_get(path: str):
+    import httpx
+
+    _throttle()
+    try:
+        r = httpx.get(f"{_LITVAR}{path}", timeout=30, follow_redirects=True,
+                      headers={"Accept": "application/json"})
+        if r.status_code in (400, 404):
+            return None  # rsID not in LitVar's index (no papers cite it) — expected, stay quiet
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:  # noqa: BLE001 - network is best-effort; report & continue
+        console.print(f"[yellow]LitVar probe failed[/] ({path}): {e}")
+        return None
+
+
+def litvar_pmids(rsid: str, recent: int = 25) -> list[str]:
+    """The most-recent PubMed IDs mentioning a specific rsID, via NCBI LitVar2.
+
+    PMIDs are ~chronological, so we keep the highest (newest) as a bound — enough to catch papers
+    published between weekly runs without pulling a heavily-studied variant's entire back-catalogue.
+    """
+    if not rsid.lower().startswith("rs"):
+        return []
+    vid = f"litvar%40{rsid}%23%23"  # LitVar variant id form: litvar@rs...##
+    data = _litvar_get(f"/variant/get/{vid}/publications")
+    pmids = [str(p) for p in ((data or {}).get("pmids") or [])]
+    pmids.sort(key=lambda p: int(p) if p.isdigit() else 0, reverse=True)
+    return pmids[:recent]
+
+
 # ── GWAS Catalog study → variants ────────────────────────────────────────────────
 def study_rsids(pmid: str) -> list[str]:
     """Every rsID reported by the GWAS Catalog study/studies for a PubMed ID."""

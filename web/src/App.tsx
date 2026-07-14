@@ -549,7 +549,7 @@ function ChangelogView() {
               {f.url && (
                 <span className="hint" style={{ flexBasis: "100%" }}>
                   <a href={f.url} target="_blank" rel="noreferrer">
-                    {f.source === "pubmed" ? "PubMed" : f.source === "gwas" ? "GWAS Catalog / PubMed" : "source"} ↗
+                    {f.source === "pubmed" ? "PubMed" : f.source === "litvar" ? "PubMed (LitVar)" : f.source === "gwas" ? "GWAS Catalog / PubMed" : "source"} ↗
                   </a>
                 </span>
               )}

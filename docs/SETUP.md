@@ -11,15 +11,15 @@ installed, ~25 GB of free disk, and your sequencing.com 30× WGS files.
 
 ## 1. Get the Locus folder
 
-Ask the person who shared Locus with you to **add you as a collaborator** on the private
-GitHub repo, then clone it (this avoids a macOS security warning):
+Clone the public repo — cloning (rather than downloading the `.zip`) avoids a macOS security
+warning on the setup file:
 
 ```bash
-git clone <the repo URL>
+git clone https://github.com/mattsmcnulty/locus.git
 ```
 
-*(Alternative: if you were sent a `.zip`, unzip it, then run this once so macOS doesn't block
-the setup file: `xattr -dr com.apple.quarantine <the unzipped folder>`.)*
+*(Alternative: on the GitHub page click **Code → Download ZIP**, unzip it, then run this once so
+macOS doesn't block the setup file: `xattr -dr com.apple.quarantine <the unzipped folder>`.)*
 
 ## 2. Download your genome from sequencing.com
 

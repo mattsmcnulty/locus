@@ -29,11 +29,16 @@ from .db import connect
 
 console = Console()
 
-# Re-annotate the full local-DB chain on a ClinVar refresh so gnomAD AF + SnpEff genes +
-# AlphaMissense survive. annotate.run() always rebuilds from the sites VCF, so any step left
-# out here is silently *dropped* from the store — gnomAD used to be, which is why AF went
-# missing. gnomAD's streamed slices are cached per-chromosome, so re-running it is cheap.
-_REANNOTATE_STEPS = "clinvar,gnomad,snpeff,alphamissense"
+# Re-annotate the full local-DB chain on a ClinVar refresh so SnpEff genes + AlphaMissense
+# survive. annotate.run() always rebuilds from the sites VCF, so any step left out here is
+# silently *dropped* from the store — that's the bug that quietly removed gnomAD AF.
+#
+# gnomAD stays out for now, deliberately: streaming its AF over HTTPS is latency-bound
+# (~0.3s per position + a large per-chromosome index fetch), so even the scoped ~52k-position
+# set takes hours and fails mid-run. Including it here would burn ~25min of network on every
+# weekly refresh for nothing. There is no AF to drop today, so nothing is lost. Re-add it once
+# AF comes from a workable source (Ensembl REST serves gnomAD frequencies per rsID in seconds).
+_REANNOTATE_STEPS = "clinvar,snpeff,alphamissense"
 
 # Tiers, strongest first — controls ranking so signal isn't buried under noise.
 TIER_ORDER = ["strong", "moderate", "weak", "info"]

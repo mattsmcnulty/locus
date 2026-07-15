@@ -533,6 +533,55 @@ def test_pubmed_findings_dedup(genome, monkeypatch):
     assert check2["new_pmids"] == ["NEW1"]         # …but still record the unseen PMID
 
 
+def test_gnomad_scope_expression(tmp_path, monkeypatch):
+    """gnomAD AF is only worth fetching where it means something (ClinVar / AlphaMissense /
+    coding) — scoping is what turns a ~13-hour, 5.1M-position stream into ~50k positions.
+    The expression must be built only from INFO fields actually present, and be None when
+    there's nothing to scope by (caller then falls back to all positions)."""
+    from locus import annotate
+
+    def with_info(*ids):
+        monkeypatch.setattr(annotate, "_present_info", lambda _p: set(ids))
+        return annotate._gnomad_scope(tmp_path / "x.vcf.gz")
+
+    # Nothing upstream ran -> no scoping possible.
+    assert with_info() is None
+    assert with_info("DP", "MQ") is None
+
+    # ClinVar only.
+    e = with_info("CLNSIG")
+    assert e == 'INFO/CLNSIG!="."'
+
+    # Absent fields must never appear (a bogus INFO tag makes bcftools error out).
+    e = with_info("CLNSIG", "ANN")
+    assert "am_class" not in e
+    assert 'INFO/ANN~"missense_variant"' in e
+
+    # Full set: all three sources OR'd together, covering protein-altering consequences.
+    e = with_info("CLNSIG", "am_class", "ANN")
+    for frag in ('INFO/CLNSIG!="."', 'INFO/am_class!="."', 'INFO/ANN~"frameshift_variant"',
+                 'INFO/ANN~"stop_gained"', 'INFO/ANN~"splice_donor_variant"'):
+        assert frag in e
+    assert "'" not in e, "expression is single-quoted into a shell command"
+
+
+def test_gnomad_runs_last_in_chain():
+    """gnomAD must run after clinvar/snpeff/alphamissense — it scopes by their annotations, so
+    running it earlier would leave nothing to scope by and force a full 5.1M-position fetch."""
+    import inspect
+
+    from locus import annotate, refresh
+
+    body = inspect.getsource(annotate.run)
+    order = [body.index(f'"{s}" in requested') for s in ("clinvar", "alphamissense", "gnomad")]
+    assert order == sorted(order), "gnomad must be applied last in annotate.run()"
+    # gnomAD is deliberately OUT of the weekly refresh chain: streaming its AF is latency-bound
+    # and would burn ~25min per run for nothing. Every other local-DB step must stay in, or a
+    # refresh silently drops that annotation from the store (the original AF-disappeared bug).
+    for step in ("clinvar", "snpeff", "alphamissense"):
+        assert step in refresh._REANNOTATE_STEPS
+
+
 def test_doctor_flags_missing_java(genome, monkeypatch, capsys):
     """SnpEff/PharmCAT/Haplogrep silently self-skip without a JDK. doctor used to report a green
     'ok' just because the jar existed — that false-green hid SnpEff never running. Guard it."""

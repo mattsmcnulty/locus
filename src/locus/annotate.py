@@ -34,7 +34,8 @@ GNOMAD_GENOMES = (
     "gnomad.genomes.v4.1.sites.{chrom}.vcf.bgz"
 )
 
-ALL_STEPS = ["clinvar", "gnomad", "snpeff", "alphamissense", "pharmcat"]
+# Declaration order only; run() applies the real order (gnomad last — see run()).
+ALL_STEPS = ["clinvar", "snpeff", "alphamissense", "gnomad", "pharmcat"]
 
 
 def _index(vcf: Path) -> None:
@@ -74,38 +75,74 @@ def annotate_clinvar(src: Path, dest: Path) -> Path:
     return dest
 
 
-def annotate_gnomad(src: Path, dest: Path) -> Path:
-    """Stream gnomAD v4.1 genome AF per-chromosome (no full download) and transfer AF fields.
+# Consequences worth an allele-frequency lookup (protein-altering / splice).
+_GNOMAD_CODING = (
+    "missense_variant", "frameshift_variant", "stop_gained", "stop_lost", "start_lost",
+    "splice_acceptor_variant", "splice_donor_variant", "inframe_insertion", "inframe_deletion",
+)
 
-    The per-chromosome slices depend only on the genome's *positions* (the sites VCF), which are
-    static once ingested — so they are cached on disk and reused. Without this, every re-annotation
-    (e.g. a ClinVar refresh) would re-stream the slices, which is the slow part by far.
+
+def _gnomad_scope(src: Path) -> str | None:
+    """A bcftools ``-i`` expression selecting only positions worth an AF lookup: ClinVar-annotated,
+    AlphaMissense-scored, or protein-coding.
+
+    gnomAD AF is meaningless for the ~3M intergenic and ~1.7M intronic variants a WGS carries, and
+    streaming them is what made full annotation a ~13-hour job. Returns None when none of the
+    upstream annotations are present (nothing to scope by) — caller then falls back to all positions.
     """
-    console.print("Annotating gnomAD v4.1 allele frequencies (streamed; the first run is slow)…")
+    have = _present_info(src)
+    terms: list[str] = []
+    if "CLNSIG" in have:
+        terms.append('INFO/CLNSIG!="."')
+    if "am_class" in have:
+        terms.append('INFO/am_class!="."')
+    if "ANN" in have:
+        terms += [f'INFO/ANN~"{c}"' for c in _GNOMAD_CODING]
+    return " || ".join(terms) if terms else None
+
+
+def annotate_gnomad(src: Path, dest: Path) -> Path:
+    """Transfer gnomAD v4.1 genome AF, streamed per-chromosome (no full download).
+
+    Runs *last* in the chain so it can scope its lookups to positions the earlier steps marked
+    interesting (see ``_gnomad_scope``) — the difference between ~50k positions and ~5.1M.
+
+    Slices are cached per chromosome and keyed by a hash of the exact region set, so they're reused
+    across re-annotations but correctly re-fetched when a new ClinVar release changes which
+    positions qualify. Writes are staged and renamed, so an interrupted download can't poison it.
+    """
+    import hashlib
+
+    expr = _gnomad_scope(src)
+    console.print("Annotating gnomAD v4.1 allele frequencies (streamed)…"
+                  if expr else
+                  "[yellow]gnomAD: no upstream annotations to scope by — falling back to ALL "
+                  "positions (slow).[/]")
     info = read_info(src)
     chroms = [c for c in info.contigs if c.startswith("chr")] or sorted(
         {ln.split("\t")[0] for ln in shell.capture(
             ["bash", "-o", "pipefail", "-c", f"bcftools view -H {src} | cut -f1 | sort -u"]).splitlines()}
     )
     work = settings.work_dir
-    sites = artifacts.sites_vcf()
+    filt = f"-i '{expr}' " if expr else ""
     per_chrom: list[Path] = []
     try:
         for chrom in chroms:
+            regions = work / f"{chrom}.regions.bed"
+            shell.sh(f"bcftools query -f '%CHROM\\t%POS0\\t%END\\n' {filt}-r {chrom} {src} > {regions}")
+            if regions.stat().st_size == 0:
+                continue
+            n_pos = sum(1 for _ in regions.open())
             slim = work / f"gnomad.{chrom}.slim.vcf.gz"
-            # Cache hit: a slice newer than the sites VCF still matches this genome's positions.
-            cached = (slim.exists() and slim.stat().st_size > 0
-                      and (not sites.exists() or slim.stat().st_mtime >= sites.stat().st_mtime))
+            stamp = work / f"gnomad.{chrom}.regions.md5"
+            want = hashlib.md5(regions.read_bytes()).hexdigest()
+            cached = (slim.exists() and slim.stat().st_size > 0 and stamp.exists()
+                      and stamp.read_text().strip() == want)
             if cached:
-                console.print(f"  {chrom}: reusing cached gnomAD slice")
+                console.print(f"  {chrom}: reusing cached gnomAD slice ({n_pos:,} positions)")
             else:
-                regions = work / f"{chrom}.regions.bed"
-                shell.sh(f"bcftools query -f '%CHROM\\t%POS0\\t%END\\n' -r {chrom} {src} > {regions}")
-                if regions.stat().st_size == 0:
-                    continue
                 url = GNOMAD_GENOMES.format(chrom=chrom)
-                # Stream to a temp file and rename only on success: an interrupted download must
-                # never be left behind looking like a valid cached slice.
+                console.print(f"  {chrom}: fetching gnomAD AF at {n_pos:,} positions…")
                 tmp = work / f"gnomad.{chrom}.slim.partial.vcf.gz"
                 tmp.unlink(missing_ok=True)
                 shell.sh(
@@ -115,6 +152,7 @@ def annotate_gnomad(src: Path, dest: Path) -> Path:
                 )
                 tmp.replace(slim)
                 _index(slim)
+                stamp.write_text(want)
             out_c = work / f"{chrom}.gnomad.vcf.gz"
             shell.run([
                 "bcftools", "annotate", "-a", str(slim), "-c", GNOMAD_TRANSFER,
@@ -270,12 +308,15 @@ def run(steps: str = "all") -> Path:
     cur = src
     if "clinvar" in requested:
         cur = annotate_clinvar(cur, work / f"{settings.sample_id}.clinvar.vcf.gz")
-    if "gnomad" in requested:
-        cur = annotate_gnomad(cur, work / f"{settings.sample_id}.gnomad.vcf.gz")
     if "snpeff" in requested or "vep" in requested:
         cur = annotate_snpeff(cur, work / f"{settings.sample_id}.snpeff.vcf.gz")
     if "alphamissense" in requested:
         cur = annotate_alphamissense(cur, work / f"{settings.sample_id}.am.vcf.gz")
+    # gnomAD LAST: it scopes its (expensive, streamed) AF lookups to the positions the steps above
+    # marked interesting — ClinVar-annotated, AlphaMissense-scored, or coding. Running it earlier
+    # would leave it nothing to scope by and force a ~5.1M-position fetch.
+    if "gnomad" in requested:
+        cur = annotate_gnomad(cur, work / f"{settings.sample_id}.gnomad.vcf.gz")
 
     # Finalize the small-variant annotated VCF.
     dest = artifacts.annotated_vcf()

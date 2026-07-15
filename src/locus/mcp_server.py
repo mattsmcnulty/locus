@@ -117,8 +117,10 @@ def pharmacogenomics(gene: str = "", drug: str = "") -> queries.PgxResult:
 
 @mcp.tool()
 def allele_frequency(region: str) -> queries.VariantPage:
-    """How common is a variant? Returns gnomAD population allele frequencies for variants at a
-    position/region ('chr1:55052000' or 'chr1:55050000-55060000'). Low gnomad_af = rare."""
+    """How common is a variant? Returns gnomAD allele frequencies for variants at a position/region
+    ('chr1:55052000' or 'chr1:55050000-55060000'). Low gnomad_af = rare. Frequencies are carried for
+    the variants where rarity is informative — those ClinVar has classified or AlphaMissense calls
+    pathogenic; other variants return a null gnomad_af rather than a frequency."""
     return queries.allele_frequency(region)
 
 

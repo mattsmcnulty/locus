@@ -46,7 +46,8 @@ need the BAM/CRAM and are not yet implemented.)
 | **Traits & wellness** | Single-SNP traits (lactose, caffeine, alcohol flush, earwax, eye color, muscle type), the **HLA-B\*57:01** abacavir-hypersensitivity proxy, and your **mtDNA maternal haplogroup** |
 | **GWAS breadth** | Which genome-wide-significant (p<5e-8) risk alleles you carry, across the whole GWAS Catalog, queryable by trait |
 | **On-demand** | Paste a new paper's rsIDs and get your genotypes live (`ask_about`) |
-| **Literature** | New papers about the **specific variants you carry** (NCBI **LitVar2**, ~670 clinically-notable rsIDs) and new **PubMed** papers on your notable genes + new **GWAS** associations at your variants, all surfaced into the changelog; ask for the latest research (`literature_for`) or "which variants did this study find that I have?" (`variants_in_study`) |
+| **Population frequency** | **gnomAD** allele frequencies (via Ensembl) on the variants where rarity matters — those ClinVar has classified or AlphaMissense calls pathogenic |
+| **Literature** | New papers about the **specific variants you carry** (NCBI **LitVar2**, keyed on your clinically-notable rsIDs) and new **PubMed** papers on your notable genes + new **GWAS** associations at your variants, all surfaced into the changelog; ask for the latest research (`literature_for`) or "which variants did this study find that I have?" (`variants_in_study`) |
 | **Living updates** | `locus refresh` re-interprets your genome as databases move — **ClinVar reanalysis** (variants you carry newly classified pathogenic), plus new GWAS associations and PubMed papers on your genes |
 
 ## Architecture
@@ -56,7 +57,7 @@ sequencing.com VCFs
       │  ingest    (index, QC, normalize, chr-canonicalize — bcftools)
       ▼
   normalized VCFs
-      │  annotate  (ClinVar · gnomAD · SnpEff · AlphaMissense · PharmCAT — all native)
+      │  annotate  (ClinVar · SnpEff · AlphaMissense · PharmCAT native; gnomAD AF via Ensembl)
       ▼
  annotated variants
       │  load      (cyvcf2 → Arrow → DuckDB)
@@ -320,17 +321,23 @@ all matching against your genome is done locally.
 
 ## Acknowledgments
 
-Locus stands on excellent open tools and databases. It **downloads these on your machine at
-runtime and never redistributes them** — please respect each source's license:
+Locus stands on excellent open tools, databases, and public APIs. It **never redistributes them** —
+please respect each source's license:
 
 - **Tools:** [bcftools/samtools/htslib](https://www.htslib.org), [PLINK2](https://www.cog-genomics.org/plink/2.0/)
   (GPLv3), [SnpEff](https://pcingola.github.io/SnpEff/), [PharmCAT](https://pharmcat.org),
   [Haplogrep](https://haplogrep.i-med.ac.at), [DuckDB](https://duckdb.org).
-- **Databases:** [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/) (NCBI, public domain),
-  [gnomAD](https://gnomad.broadinstitute.org), the [1000 Genomes Project](https://www.internationalgenome.org)
+- **Databases** (downloaded to your machine, queried locally):
+  [ClinVar](https://www.ncbi.nlm.nih.gov/clinvar/) (NCBI, public domain),
+  the [1000 Genomes Project](https://www.internationalgenome.org)
   & [HGDP](https://www.internationalgenome.org/data-portal/data-collection/hgdp) reference panels,
   the [PGS Catalog](https://www.pgscatalog.org), the [NHGRI-EBI GWAS Catalog](https://www.ebi.ac.uk/gwas/),
   and [Phylotree](https://www.phylotree.org).
+- **Public APIs** (queried on demand; only rsIDs, gene symbols, and release dates are ever sent):
+  [Ensembl REST](https://rest.ensembl.org) — variant coordinates and
+  [gnomAD](https://gnomad.broadinstitute.org) allele frequencies;
+  [NCBI PubMed + LitVar2](https://www.ncbi.nlm.nih.gov/research/litvar2/) — literature;
+  [CPIC](https://cpicpgx.org) — pharmacogenomic guidelines.
 - **AlphaMissense** (Google DeepMind): the predictions are licensed **CC-BY-NC 4.0 (non-commercial)**.
   Locus uses them for personal/research interpretation only and does not redistribute them.
 

@@ -534,34 +534,39 @@ def test_pubmed_findings_dedup(genome, monkeypatch):
 
 
 def test_gnomad_scope_expression(tmp_path, monkeypatch):
-    """gnomAD AF is only worth fetching where it means something (ClinVar / AlphaMissense /
-    coding) — scoping is what turns a ~13-hour, 5.1M-position stream into ~50k positions.
-    The expression must be built only from INFO fields actually present, and be None when
-    there's nothing to scope by (caller then falls back to all positions)."""
+    """AF is only fetched where it can change an answer (AlphaMissense-pathogenic / non-benign
+    ClinVar). Scoping is what keeps this ~1k rsIDs against a rate-limited public API instead of
+    5.1M. The expression must use only INFO fields actually present (a bogus tag makes bcftools
+    error), and be None when there's nothing to scope by so the caller skips entirely."""
     from locus import annotate
 
     def with_info(*ids):
         monkeypatch.setattr(annotate, "_present_info", lambda _p: set(ids))
         return annotate._gnomad_scope(tmp_path / "x.vcf.gz")
 
-    # Nothing upstream ran -> no scoping possible.
+    # Nothing upstream ran -> no scoping possible -> skip (never "fetch everything").
     assert with_info() is None
     assert with_info("DP", "MQ") is None
 
-    # ClinVar only.
+    # AlphaMissense only: pathogenic (incl. likely_pathogenic) — not every scored variant.
+    assert with_info("am_class") == 'INFO/am_class~"pathogenic"'
+
+    # ClinVar only: present AND not one of the benign calls.
     e = with_info("CLNSIG")
-    assert e == 'INFO/CLNSIG!="."'
+    assert 'INFO/CLNSIG!="."' in e
+    for b in ("Benign", "Benign/Likely_benign", "Likely_benign"):
+        assert f'INFO/CLNSIG!="{b}"' in e
+    # Regression: bcftools' `!~` silently fails to filter CLNSIG (3,792 in -> 3,792 out), which
+    # made the "tight" scope select 43,460 variants instead of ~1k. Exact != is required.
+    assert "!~" not in e, "must not use the regex operator to exclude benign — it does not filter"
 
-    # Absent fields must never appear (a bogus INFO tag makes bcftools error out).
-    e = with_info("CLNSIG", "ANN")
-    assert "am_class" not in e
-    assert 'INFO/ANN~"missense_variant"' in e
+    # Absent fields must never leak into the expression.
+    assert "am_class" not in with_info("CLNSIG")
+    assert "CLNSIG" not in with_info("am_class")
 
-    # Full set: all three sources OR'd together, covering protein-altering consequences.
-    e = with_info("CLNSIG", "am_class", "ANN")
-    for frag in ('INFO/CLNSIG!="."', 'INFO/am_class!="."', 'INFO/ANN~"frameshift_variant"',
-                 'INFO/ANN~"stop_gained"', 'INFO/ANN~"splice_donor_variant"'):
-        assert frag in e
+    # Both present -> OR'd together, shell-safe.
+    e = with_info("CLNSIG", "am_class")
+    assert 'INFO/am_class~"pathogenic"' in e and 'INFO/CLNSIG!="."' in e and "||" in e
     assert "'" not in e, "expression is single-quoted into a shell command"
 
 

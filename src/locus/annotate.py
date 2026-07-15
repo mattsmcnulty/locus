@@ -24,15 +24,16 @@ CLINVAR_FIELDS = (
     "INFO/CLNSIG,INFO/CLNDN,INFO/CLNREVSTAT,INFO/CLNVC,INFO/CLNDISDB,"
     "INFO/CLNHGVS,INFO/MC,INFO/ALLELEID,INFO/GENEINFO"
 )
-# gnomAD AF fields, prefixed so they don't collide with any existing AF.
-GNOMAD_TRANSFER = (
-    "INFO/gnomAD_AF:=INFO/AF,INFO/gnomAD_AF_grpmax:=INFO/AF_grpmax,"
-    "INFO/gnomAD_grpmax:=INFO/grpmax,INFO/gnomAD_AC:=INFO/AC,INFO/gnomAD_AN:=INFO/AN"
-)
-GNOMAD_GENOMES = (
-    "https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1/vcf/genomes/"
-    "gnomad.genomes.v4.1.sites.{chrom}.vcf.bgz"
-)
+# gnomAD allele frequencies come from Ensembl's REST mirror, keyed by rsID.
+#
+# Why not gnomAD's own VCFs: they're only published per-chromosome (chr21 alone is 7.2 GB, the
+# set is ~300 GB) with no AF-only slim file. Streaming them is latency-bound — ~0.3s per position
+# plus a large per-chromosome index fetch — so even a scoped ~52k-position set took hours and died
+# mid-run. Ensembl answers a batch of ~180 rsIDs in seconds, keeps setup lightweight, and reuses
+# the rsID-only egress posture we already have (see gwas._resolve_rsids).
+ENSEMBL_VARIATION = "https://rest.ensembl.org/variation/homo_sapiens"
+# 'ALL' is the global AF; 'remaining' isn't a real population, so it's excluded from grpmax.
+_GNOMAD_GRPMAX_SKIP = {"ALL", "remaining"}
 
 # Declaration order only; run() applies the real order (gnomad last — see run()).
 ALL_STEPS = ["clinvar", "snpeff", "alphamissense", "gnomad", "pharmcat"]
@@ -75,98 +76,200 @@ def annotate_clinvar(src: Path, dest: Path) -> Path:
     return dest
 
 
-# Consequences worth an allele-frequency lookup (protein-altering / splice).
-_GNOMAD_CODING = (
-    "missense_variant", "frameshift_variant", "stop_gained", "stop_lost", "start_lost",
-    "splice_acceptor_variant", "splice_donor_variant", "inframe_insertion", "inframe_deletion",
-)
+# ClinVar's benign calls, excluded from the AF scope. Matched exactly, NOT by regex: bcftools'
+# `!~` silently fails to filter this field (verified: 3,792 rows in, 3,792 out), while `!=` works.
+_CLNSIG_BENIGN = ("Benign", "Benign/Likely_benign", "Likely_benign")
 
 
 def _gnomad_scope(src: Path) -> str | None:
-    """A bcftools ``-i`` expression selecting only positions worth an AF lookup: ClinVar-annotated,
-    AlphaMissense-scored, or protein-coding.
+    """A bcftools ``-i`` expression selecting the few positions where AF changes an answer:
+    AlphaMissense-pathogenic, or ClinVar-classified as anything other than benign.
 
-    gnomAD AF is meaningless for the ~3M intergenic and ~1.7M intronic variants a WGS carries, and
-    streaming them is what made full annotation a ~13-hour job. Returns None when none of the
-    upstream annotations are present (nothing to scope by) — caller then falls back to all positions.
+    Deliberately tight (~1k variants here, not 52k and certainly not 5.1M). AF is meaningless for
+    the ~3M intergenic / ~1.7M intronic variants a WGS carries, and it only *changes* a conclusion
+    for variants already suspicious — chiefly `predicted_damaging`'s rarity filter. Every extra
+    variant is another rsID batched to a rate-limited public API, so breadth here is paid for in
+    setup time and in getting throttled. Ad-hoc "how common is X" is better answered live.
+
+    Returns None when nothing upstream ran — the caller then skips rather than fetching everything.
     """
     have = _present_info(src)
     terms: list[str] = []
-    if "CLNSIG" in have:
-        terms.append('INFO/CLNSIG!="."')
     if "am_class" in have:
-        terms.append('INFO/am_class!="."')
-    if "ANN" in have:
-        terms += [f'INFO/ANN~"{c}"' for c in _GNOMAD_CODING]
+        terms.append('INFO/am_class~"pathogenic"')
+    if "CLNSIG" in have:
+        not_benign = " && ".join(f'INFO/CLNSIG!="{b}"' for b in _CLNSIG_BENIGN)
+        terms.append(f'(INFO/CLNSIG!="." && {not_benign})')
     return " || ".join(terms) if terms else None
 
 
-def annotate_gnomad(src: Path, dest: Path) -> Path:
-    """Transfer gnomAD v4.1 genome AF, streamed per-chromosome (no full download).
+def _af_cache_path() -> Path:
+    return settings.work_dir / "gnomad.af.cache.json"
 
-    Runs *last* in the chain so it can scope its lookups to positions the earlier steps marked
-    interesting (see ``_gnomad_scope``) — the difference between ~50k positions and ~5.1M.
 
-    Slices are cached per chromosome and keyed by a hash of the exact region set, so they're reused
-    across re-annotations but correctly re-fetched when a new ClinVar release changes which
-    positions qualify. Writes are staged and renamed, so an interrupted download can't poison it.
+def _load_af_cache() -> dict[str, dict]:
+    """rsID -> {allele: [af, grpmax, pop]} persisted across runs.
+
+    gnomAD frequencies are a fixed release — refetching thousands of rsIDs on every weekly
+    refresh would be pure waste, so results are cached and only unseen rsIDs are looked up.
     """
-    import hashlib
+    import json
 
-    expr = _gnomad_scope(src)
-    console.print("Annotating gnomAD v4.1 allele frequencies (streamed)…"
-                  if expr else
-                  "[yellow]gnomAD: no upstream annotations to scope by — falling back to ALL "
-                  "positions (slow).[/]")
-    info = read_info(src)
-    chroms = [c for c in info.contigs if c.startswith("chr")] or sorted(
-        {ln.split("\t")[0] for ln in shell.capture(
-            ["bash", "-o", "pipefail", "-c", f"bcftools view -H {src} | cut -f1 | sort -u"]).splitlines()}
-    )
-    work = settings.work_dir
-    filt = f"-i '{expr}' " if expr else ""
-    per_chrom: list[Path] = []
+    p = _af_cache_path()
+    if not p.exists():
+        return {}
     try:
-        for chrom in chroms:
-            regions = work / f"{chrom}.regions.bed"
-            shell.sh(f"bcftools query -f '%CHROM\\t%POS0\\t%END\\n' {filt}-r {chrom} {src} > {regions}")
-            if regions.stat().st_size == 0:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_af_cache(cache: dict[str, dict]) -> None:
+    import json
+
+    p = _af_cache_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cache))
+    tmp.replace(p)  # atomic: a crash can't truncate the cache
+
+
+def _ensembl_gnomad_af(rsids: list[str], batch: int = 180) -> dict[str, dict]:
+    """rsID -> {alt_allele: (af_all, grpmax_af, grpmax_pop)} from Ensembl's gnomAD frequencies.
+
+    Batched POSTs; best-effort with retries — a failed batch costs those variants their AF, not
+    the whole step. Only rsIDs leave the machine (same posture as gwas._resolve_rsids). Results
+    are cached on disk so re-runs (every weekly refresh) fetch only genuinely new rsIDs.
+    """
+    import time
+
+    import httpx
+
+    cache = _load_af_cache()
+    out: dict[str, dict] = {r: {a: tuple(v) for a, v in cache[r].items()} for r in rsids if r in cache}
+    todo = [r for r in rsids if r not in cache]
+    if out:
+        console.print(f"  gnomAD AF: {len(out):,} rsIDs from cache; {len(todo):,} to fetch")
+    if not todo:
+        return out
+
+    fetched, misses = 0, 0
+    for i in range(0, len(todo), batch):
+        chunk = todo[i:i + batch]
+        data = None
+        for attempt in range(2):
+            try:
+                r = httpx.post(ENSEMBL_VARIATION,
+                               headers={"Content-Type": "application/json", "Accept": "application/json"},
+                               json={"ids": chunk}, params={"pops": "1"}, timeout=30)
+                if r.status_code in (429, 500, 502, 503, 504):  # throttled or unwell — do not hammer
+                    raise RuntimeError(f"HTTP {r.status_code}")
+                r.raise_for_status()
+                data = r.json()
+                break
+            except Exception as e:  # noqa: BLE001 - network is best-effort
+                console.print(f"[yellow]  Ensembl AF batch failed (try {attempt + 1}/2): {e}[/]")
+                time.sleep(3 * (attempt + 1))
+        if not data:
+            # Bail out rather than grind: a rate-limited/unwell API won't recover inside this run,
+            # and hammering it is how you get blocked. AF is optional — skip it and move on.
+            misses += 1
+            if misses >= 2:
+                console.print("[yellow]  Ensembl unavailable — skipping gnomAD AF for this run "
+                              "(cached results kept; re-run later).[/]")
+                break
+            continue
+        misses = 0
+        for rsid, info in data.items():
+            per: dict[str, tuple] = {}
+            for p in info.get("populations") or []:
+                name = str(p.get("population", ""))
+                if not name.startswith("gnomADg:"):
+                    continue
+                grp = name.split(":", 1)[1]
+                allele, freq = p.get("allele"), p.get("frequency")
+                if allele is None or freq is None:
+                    continue
+                af_all, gmax, gpop = per.get(allele, (None, None, None))
+                if grp == "ALL":
+                    af_all = freq
+                elif grp not in _GNOMAD_GRPMAX_SKIP and (gmax is None or freq > gmax):
+                    gmax, gpop = freq, grp
+                per[allele] = (af_all, gmax, gpop)
+            out[rsid] = per
+            cache[rsid] = {a: list(v) for a, v in per.items()}  # cache misses too (empty = no AF)
+        fetched += len(chunk)
+        console.print(f"  Ensembl AF: {fetched:,}/{len(todo):,} rsIDs fetched")
+        _save_af_cache(cache)  # checkpoint: an interrupted run keeps its progress
+    return out
+
+
+def annotate_gnomad(src: Path, dest: Path) -> Path:
+    """Transfer gnomAD genome allele frequencies, sourced from Ensembl REST (keyed by rsID).
+
+    Runs *last* in the chain so it can scope lookups to positions where AF actually means
+    something (see ``_gnomad_scope``) — ~50k rather than ~5.1M. Variants without an rsID, and
+    indels whose Ensembl allele representation doesn't match the VCF ALT, simply get no AF.
+    """
+    expr = _gnomad_scope(src)
+    filt = f"-i '{expr}' " if expr else ""
+    if not expr:
+        console.print("[yellow]gnomAD: nothing to scope by — annotating every position's rsID.[/]")
+    rows = shell.capture(["bash", "-o", "pipefail", "-c",
+                          f"bcftools query -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t%ID\\n' {filt}{src}"]).splitlines()
+    variants = []
+    for ln in rows:
+        f = ln.split("\t")
+        if len(f) != 5:
+            continue
+        rsid = f[4].split(";")[0]
+        if rsid.startswith("rs"):
+            variants.append((f[0], f[1], f[2], f[3], rsid))
+    if not variants:
+        console.print("[yellow]gnomAD: no scoped variants carry an rsID — skipping.[/]")
+        return src
+
+    rsids = sorted({v[4] for v in variants})
+    console.print(f"Fetching gnomAD allele frequencies from Ensembl ({len(rsids):,} variants)…")
+    afs = _ensembl_gnomad_af(rsids)
+    if not afs:
+        console.print("[yellow]gnomAD: Ensembl returned no frequencies; leaving variants without AF.[/]")
+        return src
+
+    work = settings.work_dir
+    tsv = work / "gnomad.af.tsv"
+    n = 0
+    with tsv.open("w") as fh:
+        for chrom, pos, ref, alt, rsid in variants:
+            hit = (afs.get(rsid) or {}).get(alt)
+            if not hit:
                 continue
-            n_pos = sum(1 for _ in regions.open())
-            slim = work / f"gnomad.{chrom}.slim.vcf.gz"
-            stamp = work / f"gnomad.{chrom}.regions.md5"
-            want = hashlib.md5(regions.read_bytes()).hexdigest()
-            cached = (slim.exists() and slim.stat().st_size > 0 and stamp.exists()
-                      and stamp.read_text().strip() == want)
-            if cached:
-                console.print(f"  {chrom}: reusing cached gnomAD slice ({n_pos:,} positions)")
-            else:
-                url = GNOMAD_GENOMES.format(chrom=chrom)
-                console.print(f"  {chrom}: fetching gnomAD AF at {n_pos:,} positions…")
-                tmp = work / f"gnomad.{chrom}.slim.partial.vcf.gz"
-                tmp.unlink(missing_ok=True)
-                shell.sh(
-                    f"bcftools view -R {regions} '{url}' "
-                    f"| bcftools annotate -x '^INFO/AF,INFO/AC,INFO/AN,INFO/AF_grpmax,INFO/grpmax' "
-                    f"-Oz -o {tmp}"
-                )
-                tmp.replace(slim)
-                _index(slim)
-                stamp.write_text(want)
-            out_c = work / f"{chrom}.gnomad.vcf.gz"
-            shell.run([
-                "bcftools", "annotate", "-a", str(slim), "-c", GNOMAD_TRANSFER,
-                "-r", chrom, str(src), "-Oz", "-o", str(out_c),
-            ])
-            _index(out_c)
-            per_chrom.append(out_c)
-        if per_chrom:
-            shell.run(["bcftools", "concat", "-Oz", "-o", str(dest), *map(str, per_chrom)])
-            _index(dest)
-            return dest
-    except shell.ToolError as e:
-        console.print(f"[yellow]gnomAD streaming failed ({e}); leaving variants without AF.[/]")
-    return src
+            af_all, gmax, gpop = hit
+            if af_all is None and gmax is None:
+                continue
+            fh.write(f"{chrom}\t{pos}\t{ref}\t{alt}\t{'.' if af_all is None else af_all}\t"
+                     f"{'.' if gmax is None else gmax}\t{gpop or '.'}\n")
+            n += 1
+    if n == 0:
+        console.print("[yellow]gnomAD: no frequencies matched the scoped ALT alleles — skipping.[/]")
+        return src
+
+    shell.sh(f"sort -k1,1 -k2,2n {tsv} | bgzip -f > {tsv}.gz")
+    shell.run(["tabix", "-f", "-s", "1", "-b", "2", "-e", "2", f"{tsv}.gz"])
+    header = work / "gnomad.header.txt"
+    _d = "via Ensembl"
+    header.write_text(
+        f'##INFO=<ID=gnomAD_AF,Number=1,Type=Float,Description="gnomAD genomes AF ({_d})">\n'
+        f'##INFO=<ID=gnomAD_AF_grpmax,Number=1,Type=Float,Description="Max gnomAD AF across populations ({_d})">\n'
+        f'##INFO=<ID=gnomAD_grpmax,Number=1,Type=String,Description="gnomAD population with the max AF ({_d})">\n'
+    )
+    shell.run(["bcftools", "annotate", "-a", f"{tsv}.gz", "-h", str(header),
+               "-c", "CHROM,POS,REF,ALT,gnomAD_AF,gnomAD_AF_grpmax,gnomAD_grpmax",
+               str(src), "-Oz", "-o", str(dest)])
+    _index(dest)
+    console.print(f"  gnomAD-annotated records: {n:,}")
+    return dest
 
 
 def annotate_snpeff(src: Path, dest: Path) -> Path:

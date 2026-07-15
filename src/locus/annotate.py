@@ -75,29 +75,46 @@ def annotate_clinvar(src: Path, dest: Path) -> Path:
 
 
 def annotate_gnomad(src: Path, dest: Path) -> Path:
-    """Stream gnomAD v4.1 genome AF per-chromosome (no full download) and transfer AF fields."""
-    console.print("Annotating gnomAD v4.1 allele frequencies (streamed; can be slow over network)…")
+    """Stream gnomAD v4.1 genome AF per-chromosome (no full download) and transfer AF fields.
+
+    The per-chromosome slices depend only on the genome's *positions* (the sites VCF), which are
+    static once ingested — so they are cached on disk and reused. Without this, every re-annotation
+    (e.g. a ClinVar refresh) would re-stream the slices, which is the slow part by far.
+    """
+    console.print("Annotating gnomAD v4.1 allele frequencies (streamed; the first run is slow)…")
     info = read_info(src)
     chroms = [c for c in info.contigs if c.startswith("chr")] or sorted(
         {ln.split("\t")[0] for ln in shell.capture(
             ["bash", "-o", "pipefail", "-c", f"bcftools view -H {src} | cut -f1 | sort -u"]).splitlines()}
     )
     work = settings.work_dir
+    sites = artifacts.sites_vcf()
     per_chrom: list[Path] = []
     try:
         for chrom in chroms:
-            regions = work / f"{chrom}.regions.bed"
-            shell.sh(f"bcftools query -f '%CHROM\\t%POS0\\t%END\\n' -r {chrom} {src} > {regions}")
-            if regions.stat().st_size == 0:
-                continue
             slim = work / f"gnomad.{chrom}.slim.vcf.gz"
-            url = GNOMAD_GENOMES.format(chrom=chrom)
-            shell.sh(
-                f"bcftools view -R {regions} '{url}' "
-                f"| bcftools annotate -x '^INFO/AF,INFO/AC,INFO/AN,INFO/AF_grpmax,INFO/grpmax' "
-                f"-Oz -o {slim}"
-            )
-            _index(slim)
+            # Cache hit: a slice newer than the sites VCF still matches this genome's positions.
+            cached = (slim.exists() and slim.stat().st_size > 0
+                      and (not sites.exists() or slim.stat().st_mtime >= sites.stat().st_mtime))
+            if cached:
+                console.print(f"  {chrom}: reusing cached gnomAD slice")
+            else:
+                regions = work / f"{chrom}.regions.bed"
+                shell.sh(f"bcftools query -f '%CHROM\\t%POS0\\t%END\\n' -r {chrom} {src} > {regions}")
+                if regions.stat().st_size == 0:
+                    continue
+                url = GNOMAD_GENOMES.format(chrom=chrom)
+                # Stream to a temp file and rename only on success: an interrupted download must
+                # never be left behind looking like a valid cached slice.
+                tmp = work / f"gnomad.{chrom}.slim.partial.vcf.gz"
+                tmp.unlink(missing_ok=True)
+                shell.sh(
+                    f"bcftools view -R {regions} '{url}' "
+                    f"| bcftools annotate -x '^INFO/AF,INFO/AC,INFO/AN,INFO/AF_grpmax,INFO/grpmax' "
+                    f"-Oz -o {tmp}"
+                )
+                tmp.replace(slim)
+                _index(slim)
             out_c = work / f"{chrom}.gnomad.vcf.gz"
             shell.run([
                 "bcftools", "annotate", "-a", str(slim), "-c", GNOMAD_TRANSFER,

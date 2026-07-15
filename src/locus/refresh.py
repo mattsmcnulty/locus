@@ -29,10 +29,11 @@ from .db import connect
 
 console = Console()
 
-# Re-annotate the full local-DB chain on a ClinVar refresh so SnpEff genes +
-# AlphaMissense survive (each step copies the previous; running clinvar alone would
-# strip them). gnomAD is deferred/streamed, so it's left out of the refresh chain.
-_REANNOTATE_STEPS = "clinvar,snpeff,alphamissense"
+# Re-annotate the full local-DB chain on a ClinVar refresh so gnomAD AF + SnpEff genes +
+# AlphaMissense survive. annotate.run() always rebuilds from the sites VCF, so any step left
+# out here is silently *dropped* from the store — gnomAD used to be, which is why AF went
+# missing. gnomAD's streamed slices are cached per-chromosome, so re-running it is cheap.
+_REANNOTATE_STEPS = "clinvar,gnomad,snpeff,alphamissense"
 
 # Tiers, strongest first — controls ranking so signal isn't buried under noise.
 TIER_ORDER = ["strong", "moderate", "weak", "info"]

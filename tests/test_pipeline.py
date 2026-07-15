@@ -533,6 +533,26 @@ def test_pubmed_findings_dedup(genome, monkeypatch):
     assert check2["new_pmids"] == ["NEW1"]         # …but still record the unseen PMID
 
 
+def test_doctor_flags_missing_java(genome, monkeypatch, capsys):
+    """SnpEff/PharmCAT/Haplogrep silently self-skip without a JDK. doctor used to report a green
+    'ok' just because the jar existed — that false-green hid SnpEff never running. Guard it."""
+    from locus import cli
+    from locus.config import settings
+
+    ann = settings.annotations_dir
+    (ann / "snpEff").mkdir(parents=True, exist_ok=True)
+    (ann / "snpEff" / "snpEff.jar").write_text("")       # jar present…
+    monkeypatch.setattr(cli, "_resolve_java", lambda: None)  # …but no working Java
+    cli.doctor()
+    out = capsys.readouterr().out
+    assert "needs java" in out, "doctor must flag a present-but-unusable Java-backed tool"
+
+    # With Java working, the same row is a legitimate ok.
+    monkeypatch.setattr(cli, "_resolve_java", lambda: "/usr/bin/java")
+    cli.doctor()
+    assert "needs java" not in capsys.readouterr().out
+
+
 def test_litvar_pmids(monkeypatch):
     """LitVar2 rsID→PMIDs: keep the newest (highest) PMIDs, capped; reject non-rs ids."""
     from locus import literature

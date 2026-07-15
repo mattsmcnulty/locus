@@ -118,22 +118,30 @@ def doctor() -> None:
         table.add_row("genome VCFs", "[yellow]none[/]",
                       f"drop your sequencing.com files into {settings.genome_dir}")
 
-    def _db_row(label: str, present: bool, hint: str) -> None:
+    # Java-backed steps self-skip silently without a JDK — surface that instead of a false "ok".
+    java_ok = _resolve_java() is not None
+
+    def _db_row(label: str, present: bool, hint: str, needs_java: bool = False) -> None:
+        if present and needs_java and not java_ok:
+            table.add_row(label, "[yellow]needs java[/]",
+                          "installed, but no Java runtime → this step SKIPS. Fix: brew install openjdk")
+            return
         table.add_row(label, "[green]ok[/]" if present else "[yellow]absent[/]", hint)
 
     ann = settings.annotations_dir
     _db_row("reference FASTA", artifacts.find_reference() is not None, "locus download reference")
     _db_row("ClinVar", (ann / download.CLINVAR_CHR_VCF).exists(), "locus download clinvar")
-    _db_row("SnpEff", (ann / "snpEff" / "snpEff.jar").exists(), "locus download snpeff")
+    _db_row("SnpEff", (ann / "snpEff" / "snpEff.jar").exists(), "locus download snpeff", needs_java=True)
     _db_row("AlphaMissense", (ann / "alphamissense" / "AlphaMissense_hg38.slim.tsv.bgz").exists(),
             "locus download alphamissense")
     _db_row("PharmCAT (native)", (artifacts.pharmcat_install_dir() / "pharmcat_pipeline").exists(),
-            "locus download pharmcat")
+            "locus download pharmcat", needs_java=True)
     _db_row("ancestry panel",
             (ann / "ancestry" / "all_hg38.pgen").exists() and (settings.data_dir / "tools" / "plink2").exists(),
             "locus download ancestry")
     _db_row("GWAS Catalog", (ann / "gwas" / "gwas-catalog-associations.tsv").exists(), "locus download gwas")
-    _db_row("Haplogrep (mtDNA)", (ann / "haplogrep" / "haplogrep.jar").exists(), "locus download haplogrep")
+    _db_row("Haplogrep (mtDNA)", (ann / "haplogrep" / "haplogrep.jar").exists(), "locus download haplogrep",
+            needs_java=True)
 
     # MCP registration with Claude.
     reg = mcp_install.is_registered()

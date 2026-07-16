@@ -163,6 +163,25 @@ def secondary_findings(limit: int = 100) -> queries.VariantPage:
 
 
 @mcp.tool()
+def carrier_status(limit: int = 100) -> queries.CarrierReport:
+    """Carrier status for common recessive conditions — which ones this person carries ONE
+    pathogenic copy of. This is about their children, not their own health: a carrier is
+    typically unaffected. It matters when both partners carry the same condition (1-in-4 risk per
+    pregnancy), so frame results around family planning and a genetic counselor, never as a
+    personal diagnosis. 'likely_affected' = two pathogenic copies (phase unknown from a VCF, so a
+    compound-het is presumed, not proven).
+
+    IMPORTANT: always report the `not_assessed` list alongside any result. This is a curated panel
+    of VCF-assessable conditions, not a clinical carrier screen — and several of the most
+    important screens (SMN1/spinal muscular atrophy, FMR1/Fragile X) CANNOT be answered from this
+    data at all. An empty `hits` list is NOT a negative carrier screen; do not present it as one."""
+    err = _require_db()
+    if err:
+        return queries.CarrierReport(total=0, hits=[], not_assessed=[], panel_size=0, note=err)
+    return queries.carrier_status(limit=limit)
+
+
+@mcp.tool()
 def traits(category: str = "") -> queries.TraitsReport:
     """Single-SNP traits/wellness (lactose, caffeine, alcohol flush, earwax, eye color, muscle type),
     the HLA-B*57:01 abacavir-hypersensitivity screening proxy, and the mtDNA maternal-lineage

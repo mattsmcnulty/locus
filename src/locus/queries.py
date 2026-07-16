@@ -207,6 +207,88 @@ def secondary_findings(limit: int = 100, offset: int = 0) -> VariantPage:
     return _var_select(where, params, limit, offset)
 
 
+class CarrierHit(BaseModel):
+    gene: str
+    condition: str
+    inheritance: str = Field(description="AR (autosomal recessive) | XL (X-linked)")
+    status: str = Field(description="carrier (one copy) | likely_affected (two copies)")
+    n_variants: int = Field(description="Pathogenic/likely-pathogenic variants found in this gene")
+    zygosity: str | None = Field(default=None, description="Genotype of the top variant, e.g. 0/1")
+    rsid: str | None = None
+    clnsig: str | None = None
+    clndn: str | None = Field(default=None, description="ClinVar's disease name for the variant")
+
+
+class NotAssessed(BaseModel):
+    gene: str
+    condition: str
+    why: str = Field(description="Why this genome's data cannot answer it")
+
+
+class CarrierReport(BaseModel):
+    total: int
+    hits: list[CarrierHit]
+    not_assessed: list[NotAssessed] = Field(
+        description="Conditions this data CANNOT speak to — absence here is not a negative result")
+    panel_size: int
+    note: str
+
+
+def carrier_status(limit: int = 100) -> CarrierReport:
+    """Carrier status for common recessive conditions: which you carry one pathogenic copy of.
+
+    The complement of ``secondary_findings``, which drops lone heterozygous carriers because they
+    aren't findings *for you*. They are exactly what matters for family planning: two carriers of
+    the same condition have a 1-in-4 risk per pregnancy.
+
+    Always returns ``not_assessed`` alongside the hits. Several of the most important carrier
+    tests (SMN1, FMR1) are simply not answerable from a VCF, and an empty result that quietly
+    implied they had been checked would be the most dangerous thing this function could do.
+    """
+    from .panels import CARRIER_PANEL, CARRIER_UNASSESSABLE
+
+    by_gene = {c.gene: c for c in CARRIER_PANEL}
+    genes = sorted(by_gene)
+    ph = ", ".join("?" for _ in genes)
+    plp = ("lower(clnsig) LIKE '%pathogenic%' AND lower(clnsig) NOT LIKE '%benign%' "
+           "AND lower(clnsig) NOT LIKE '%conflicting%'")
+    with connect(read_only=True) as con:
+        rows = con.execute(
+            f"SELECT upper(gene), count(*), max(CASE WHEN gt IN ('1/1','1|1') THEN 1 ELSE 0 END), "
+            f"       any_value(gt), any_value(rsid), any_value(clnsig), any_value(clndn) "
+            f"FROM variants WHERE {plp} AND upper(gene) IN ({ph}) GROUP BY upper(gene)",
+            [g.upper() for g in genes],
+        ).fetchall()
+
+    hits: list[CarrierHit] = []
+    for gene, n, has_hom, gt, rsid, clnsig, clndn in rows:
+        info = by_gene[gene]
+        # Two copies (homozygous, or ≥2 P/LP variants — phase unknown from a VCF, so compound-het
+        # is presumed rather than proven) means possibly affected, not merely a carrier.
+        affected = bool(has_hom) or n >= 2
+        hits.append(CarrierHit(
+            gene=gene, condition=info.condition, inheritance=info.inheritance,
+            status="likely_affected" if affected else "carrier",
+            n_variants=n, zygosity=gt, rsid=rsid, clnsig=clnsig,
+            clndn=(clndn or "").replace("_", " ") or None))
+    hits.sort(key=lambda h: (h.status != "likely_affected", h.gene))
+
+    note = (
+        "Carrier status is about your children, not your health: one copy of a recessive variant "
+        "is typically silent for you. It matters when both partners carry the same condition "
+        "(1-in-4 risk per pregnancy), so interpret it with a partner's results and a genetic "
+        "counselor. 'likely_affected' means two pathogenic copies were seen — phase is unknown "
+        "from a VCF, so a compound-het is presumed, not proven; confirm clinically. "
+        "This is a curated panel of common, VCF-assessable conditions — NOT a clinical carrier "
+        "screen (ACMG's Tier 3 panel is 113 genes). An empty result means nothing was found in "
+        "these genes; it is not a negative screen, and it says nothing about `not_assessed`."
+    )
+    return CarrierReport(
+        total=len(hits), hits=hits[:limit], panel_size=len(CARRIER_PANEL), note=note,
+        not_assessed=[NotAssessed(gene=g, condition=c, why=w) for g, c, w in CARRIER_UNASSESSABLE],
+    )
+
+
 def pharmacogenomics(gene: str | None = None, drug: str | None = None) -> PgxResult:
     with connect(read_only=True) as con:
         gwhere, gparams = ("TRUE", [])

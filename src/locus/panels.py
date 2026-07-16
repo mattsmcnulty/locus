@@ -48,6 +48,66 @@ ACMG_SF_RECESSIVE = frozenset({
 })
 
 
+# ── Carrier screening ────────────────────────────────────────────────────────────
+# Recessive conditions where carrying ONE pathogenic copy is usually silent for you but matters
+# for family planning (two carriers → 1-in-4 risk per pregnancy). This is the complement of
+# `secondary_findings`, which deliberately drops lone heterozygous carriers.
+#
+# Scope, stated honestly: this is a curated panel of common, **VCF-assessable** conditions. It is
+# NOT a clinical carrier screen — ACMG's Tier 3 panel is 113 genes (Gregg et al, Genet Med 2021).
+# Nothing here should be read as "you are not a carrier" for anything off this list.
+@dataclass(frozen=True)
+class CarrierGene:
+    gene: str
+    condition: str
+    inheritance: str   # "AR" (autosomal recessive) | "XL" (X-linked)
+
+
+CARRIER_PANEL: tuple[CarrierGene, ...] = (
+    CarrierGene("CFTR", "Cystic fibrosis", "AR"),
+    CarrierGene("HBB", "Sickle cell disease / beta-thalassemia", "AR"),
+    CarrierGene("HEXA", "Tay-Sachs disease", "AR"),
+    CarrierGene("GBA", "Gaucher disease", "AR"),
+    CarrierGene("PAH", "Phenylketonuria (PKU)", "AR"),
+    CarrierGene("GALT", "Classic galactosemia", "AR"),
+    CarrierGene("ATP7B", "Wilson disease", "AR"),
+    CarrierGene("SERPINA1", "Alpha-1 antitrypsin deficiency", "AR"),
+    CarrierGene("BTD", "Biotinidase deficiency", "AR"),
+    CarrierGene("ACADM", "MCAD deficiency", "AR"),
+    CarrierGene("ASPA", "Canavan disease", "AR"),
+    CarrierGene("ELP1", "Familial dysautonomia", "AR"),
+    CarrierGene("FANCC", "Fanconi anemia, group C", "AR"),
+    CarrierGene("BLM", "Bloom syndrome", "AR"),
+    CarrierGene("MCOLN1", "Mucolipidosis IV", "AR"),
+    CarrierGene("NPC1", "Niemann-Pick disease, type C1", "AR"),
+    CarrierGene("SLC26A4", "Pendred syndrome / hearing loss", "AR"),
+    CarrierGene("GJB2", "Nonsyndromic hearing loss (connexin 26)", "AR"),
+    CarrierGene("SLC22A5", "Primary carnitine deficiency", "AR"),
+    CarrierGene("CLN3", "Batten disease (juvenile NCL)", "AR"),
+    CarrierGene("USH2A", "Usher syndrome type 2A", "AR"),
+    CarrierGene("PCDH15", "Usher syndrome type 1F", "AR"),
+    CarrierGene("DMD", "Duchenne/Becker muscular dystrophy", "XL"),
+    CarrierGene("F8", "Hemophilia A", "XL"),
+    CarrierGene("F9", "Hemophilia B", "XL"),
+    CarrierGene("G6PD", "G6PD deficiency", "XL"),
+)
+
+# Conditions this data CANNOT speak to. Reported explicitly as "not assessed" rather than being
+# quietly absent — the whole failure mode we keep hitting is a screen that never ran being read as
+# a clean result. Several of the most important carrier tests are exactly these.
+CARRIER_UNASSESSABLE: tuple[tuple[str, str, str], ...] = (
+    ("SMN1", "Spinal muscular atrophy",
+     "carrier status is a copy-number call (SMN1 exon-7 dosage, and SMN2 paralog interference); "
+     "short-read VCFs cannot determine it. This is one of the two universally-offered screens."),
+    ("FMR1", "Fragile X syndrome",
+     "caused by a CGG repeat expansion, which a VCF does not represent at all — needs the reads."),
+    ("HBA1/HBA2", "Alpha-thalassemia",
+     "most carriers have whole-gene deletions (copy-number), not SNVs."),
+    ("CYP21A2", "Congenital adrenal hyperplasia (21-hydroxylase deficiency)",
+     "near-identical CYP21A1P pseudogene makes short-read calls unreliable."),
+)
+
+
 @dataclass(frozen=True)
 class TagSnp:
     rsid: str

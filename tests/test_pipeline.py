@@ -641,6 +641,60 @@ def test_study_variants_distinguishes_failure_from_zero(monkeypatch):
     assert "could not be resolved" in res["note"]   # 1 of 2 unresolved is surfaced, not hidden
 
 
+def test_carrier_status_zygosity_and_honesty(genome):
+    """Carrier = one copy (silent for you, matters for your children). Two copies = possibly
+    affected. And the report must ALWAYS name what it cannot assess: SMN1/FMR1 are among the most
+    important carrier screens and a VCF cannot answer them, so an empty result that implied
+    otherwise would be the most dangerous output this tool could produce."""
+    from locus import ingest, load, queries
+    from locus.config import settings
+    from locus.db import connect
+    from locus.panels import CARRIER_PANEL
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+
+    # Even with zero hits, the "cannot assess" list must be present and non-empty.
+    empty = queries.carrier_status()
+    assert empty.total == 0
+    assert {n.gene for n in empty.not_assessed} >= {"SMN1", "FMR1"}
+    assert "not a negative screen" in empty.note.lower() or "NOT a clinical carrier screen" in empty.note
+
+    with connect(read_only=False) as con:
+        con.executemany(
+            "INSERT INTO variants (chrom,pos,ref,alt,gene,clnsig,gt,rsid) VALUES (?,?,?,?,?,?,?,?)",
+            [("chr12", 102917130, "C", "T", "PAH", "Pathogenic", "0/1", "rsA"),      # 1 copy -> carrier
+             ("chr7", 117559590, "A", "G", "CFTR", "Pathogenic", "1/1", "rsB"),      # hom -> affected
+             ("chr15", 72346580, "G", "A", "HEXA", "Pathogenic", "0/1", "rsC"),      # 2 P/LP in one
+             ("chr15", 72346590, "T", "C", "HEXA", "Likely_pathogenic", "0/1", "rsD"),  # gene -> affected
+             ("chr1", 100, "A", "G", "PAH", "Benign", "0/1", "rsE")],                # benign -> ignored
+        )
+    by_gene = {h.gene: h for h in queries.carrier_status().hits}
+    assert by_gene["PAH"].status == "carrier" and by_gene["PAH"].n_variants == 1
+    assert by_gene["CFTR"].status == "likely_affected", "homozygous P/LP is not merely a carrier"
+    assert by_gene["HEXA"].status == "likely_affected", "two P/LP in one gene = presumed compound het"
+    assert by_gene["PAH"].condition == "Phenylketonuria (PKU)"
+    # Benign never contributes.
+    assert by_gene["PAH"].n_variants == 1
+
+    # likely_affected sorts first — it's the part that isn't just about family planning.
+    assert queries.carrier_status().hits[0].status == "likely_affected"
+    assert len(CARRIER_PANEL) == queries.carrier_status().panel_size
+
+
+def test_carrier_panel_integrity():
+    from locus.panels import CARRIER_PANEL, CARRIER_UNASSESSABLE
+
+    genes = [c.gene for c in CARRIER_PANEL]
+    assert len(genes) == len(set(genes)), "no duplicate genes"
+    assert all(c.inheritance in ("AR", "XL") for c in CARRIER_PANEL)
+    assert all(c.condition for c in CARRIER_PANEL)
+    # The unassessable genes must NOT be in the panel — listing them as screened is the lie.
+    unassessable = {g for g, _, _ in CARRIER_UNASSESSABLE}
+    assert not (unassessable & set(genes)), "a gene we cannot assess must not appear as screened"
+    assert all(why for _, _, why in CARRIER_UNASSESSABLE), "each must explain why"
+
+
 def test_acmg_panel_matches_v33():
     """The ACMG SF panel is the whole basis of `secondary_findings`, whose empty result is
     reported to the user as reassuring. A gene missing here is a screen that silently never

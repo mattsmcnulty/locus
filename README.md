@@ -45,6 +45,7 @@ need the BAM/CRAM and are not yet implemented.)
 | **Pharmacogenomics** | **PharmCAT** star-allele diplotypes, metabolizer phenotypes, and CPIC/DPWG drug guidance |
 | **Ancestry** | Biogeographic ancestry via PCA + k-NN over 1000 Genomes + HGDP — continental and sub-continental |
 | **Polygenic risk** | PGS Catalog scores reported as an **ancestry-matched percentile** (CAD, LDL, T2D, Lp(a), …) |
+| **Carrier status** | Recessive conditions you carry one copy of (CF, PKU, Tay-Sachs, hearing loss, …) — the family-planning layer, with an explicit list of what a VCF *cannot* assess (SMN1, Fragile X) |
 | **Traits & wellness** | Single-SNP traits (lactose, caffeine, alcohol flush, earwax, eye color, muscle type), the **HLA-B\*57:01** abacavir-hypersensitivity proxy, and your **mtDNA maternal haplogroup** |
 | **GWAS breadth** | Which genome-wide-significant (p<5e-8) risk alleles you carry, across the whole GWAS Catalog, queryable by trait |
 | **On-demand** | Paste a new paper's rsIDs and get your genotypes live (`ask_about`) |
@@ -174,7 +175,7 @@ clients dispatch them reliably):
 **Lookups** — `genome_overview`, `lookup_variant_by_rsid`, `lookup_variants_in_gene`,
 `lookup_variants_in_region`, `allele_frequency`, `run_sql` (guarded read-only SQL)
 **Clinical** — `clinical_findings` (ClinVar P/LP), `predicted_damaging` (rare AlphaMissense-pathogenic),
-`secondary_findings` (ACMG SF), `structural_variants` (CNV/SV)
+`secondary_findings` (ACMG SF), `carrier_status` (recessive carrier states), `structural_variants` (CNV/SV)
 **Pharmacogenomics** — `pharmacogenomics` (PharmCAT diplotypes + CPIC/DPWG guidance)
 **Ancestry & risk** — `ancestry`, `polygenic_risk`
 **Traits & breadth** — `traits`, `gwas_associations`, `ask_about` (paste rsIDs or a trait)

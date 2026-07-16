@@ -165,12 +165,14 @@ def doctor() -> None:
 
 
 # What each variant column powers, and which step fills it — so a gap names its own fix.
+# `scoped` marks columns only ever filled for a deliberate subset, where a low % is correct
+# and only zero is a bug (ClinVar/AlphaMissense/gnomAD annotate a slice of the genome by design).
 _COVERAGE_CHECKS = (
-    ("consequence", "SnpEff", "consequences + gene names", "locus annotate --steps snpeff"),
-    ("gene", "SnpEff", "gene lookups, literature watch", "locus annotate --steps snpeff"),
-    ("clnsig", "ClinVar", "clinical + secondary findings", "locus annotate --steps clinvar"),
-    ("am_class", "AlphaMissense", "predicted_damaging", "locus annotate --steps alphamissense"),
-    ("gnomad_af", "gnomAD/Ensembl", "allele_frequency, rarity filter", "locus annotate --steps gnomad"),
+    ("consequence", "SnpEff", "consequences + gene names", "locus annotate --steps snpeff", False),
+    ("gene", "SnpEff", "gene lookups, literature watch", "locus annotate --steps snpeff", False),
+    ("clnsig", "ClinVar", "clinical + secondary findings", "locus annotate --steps clinvar", True),
+    ("am_class", "AlphaMissense", "predicted_damaging", "locus annotate --steps alphamissense", True),
+    ("gnomad_af", "gnomAD/Ensembl", "allele_frequency, rarity filter", "locus annotate --steps gnomad", True),
 )
 
 
@@ -184,16 +186,17 @@ def _coverage_rows() -> list[tuple[tuple[str, str], str]]:
             total = con.execute("SELECT count(*) FROM variants").fetchone()[0]
             if not total:
                 return [(("variant coverage", "[yellow]empty[/]"), "no variants loaded — run `locus load`")]
-            for col, step, powers, fix in _COVERAGE_CHECKS:
+            for col, step, powers, fix, scoped in _COVERAGE_CHECKS:
                 try:
                     n = con.execute(f"SELECT count({col}) FROM variants").fetchone()[0]
                 except Exception:  # noqa: BLE001 - column absent on an older store
                     n = 0
-                pct = 100 * n / total
                 if n == 0:
                     status, detail = "[red]NOT APPLIED[/]", f"{step} produced nothing → {powers} dead. Fix: {fix}"
+                elif scoped:
+                    status, detail = "[green]ok[/]", f"{n:,} variants — {step} (scoped by design)"
                 else:
-                    status, detail = "[green]ok[/]", f"{n:,}/{total:,} ({pct:.1f}%) — {step}"
+                    status, detail = "[green]ok[/]", f"{n:,}/{total:,} ({100 * n / total:.1f}%) — {step}"
                 rows.append(((f"  ↳ {col}", status), detail))
             # Deep-interpretation tables are written by their own steps and preserved across reloads.
             for tbl, fix in (("pgs_scores", "locus ancestry"), ("traits", "locus traits"),

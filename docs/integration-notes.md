@@ -131,8 +131,22 @@ bcftools annotate -a clinvar.chr.vcf.gz \
 
 ## MCP Python SDK + DuckDB
 
-- Package `mcp` 1.28.0 (June 2026). **Pin `mcp>=1.27,<2`** — v2 is imminent (~2026-07-27) with breaking
-  changes. Import FastMCP from **`mcp.server.fastmcp`** (the vendored 1.x), NOT the standalone `fastmcp` 3.x.
+- Package `mcp` 1.28.x. **Pin `mcp>=1.27,<2` in pyproject** — the upper bound is load-bearing, not
+  decorative. Import FastMCP from **`mcp.server.fastmcp`** (the vendored 1.x), NOT the standalone `fastmcp` 3.x.
+- **v2 migration — assessed 2026-07, deliberately deferred.** Measured against `mcp==2.0.0b2` in a throwaway
+  venv rather than assumed:
+  - v2 is **pre-release only** (2.0.0a1–a3, b1, b2); newest stable is 1.28.x. Migrating now means building
+    against a beta whose API can still move before 2.0.0 — i.e. migrating twice.
+  - `mcp.server.fastmcp` is **removed outright** in v2 (ModuleNotFoundError). FastMCP is not renamed or
+    relocated: `mcp.FastMCP` and `mcp.server.FastMCP` are both absent. The whole server would need porting.
+  - The replacement is **`from mcp.server import MCPServer`**, which keeps the same decorator shape —
+    `.tool()`, `.prompt()`, `.resource()`, `.run()` all exist — so the port looks close to
+    `FastMCP("locus")` → `MCPServer("locus")` plus a re-verify of the output schemas.
+  - The **client** API our stdio test uses (`ClientSession`, `StdioServerParameters`, `mcp.client.stdio`)
+    survives v2 unchanged.
+  - **Trigger to revisit:** 2.0.0 final on PyPI. Then: bump the bound, swap the import/constructor, and
+    re-run `test_mcp_stdio_tools_respond` — it exercises the real stdio path and asserts the object-typed
+    output schemas, which is exactly what a framework swap is most likely to break.
 - Tools: `@mcp.tool()` with a **return type annotation** (Pydantic model / `list[...]`) → auto output schema +
   validated structured JSON. Without an annotation you only get unstructured text.
 - Claude Code truncates MCP output > ~10k tokens → **return concise, paginated results** (`limit`/`offset`,

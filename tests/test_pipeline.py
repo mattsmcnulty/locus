@@ -663,6 +663,21 @@ def test_gnomad_scope_expression(tmp_path, monkeypatch):
     assert "'" not in e, "expression is single-quoted into a shell command"
 
 
+def test_ensembl_af_batching_is_pinned():
+    """`pops=1` returns ~120 population records per variant, so the RESPONSE is the constraint,
+    not the request count. Measured against the live API: 25 ids = ~220KB in 20-36s; 50 ids
+    reliably times out. A 180-id batch with a 30s timeout failed 100% of the time and looked
+    exactly like rate-limiting — it wasn't. Keep batch small and the timeout well above 36s."""
+    import inspect
+
+    from locus import annotate
+
+    sig = inspect.signature(annotate._ensembl_gnomad_af)
+    assert sig.parameters["batch"].default <= 25, "batches >25 time out against Ensembl"
+    src = inspect.getsource(annotate._ensembl_gnomad_af)
+    assert "timeout=90" in src, "timeout must exceed the observed 20-36s response time"
+
+
 def test_gnomad_runs_last_in_chain():
     """gnomAD must run after clinvar/snpeff/alphamissense — it scopes by their annotations, so
     running it earlier would leave nothing to scope by and force a full 5.1M-position fetch."""

@@ -135,12 +135,17 @@ def _save_af_cache(cache: dict[str, dict]) -> None:
     tmp.replace(p)  # atomic: a crash can't truncate the cache
 
 
-def _ensembl_gnomad_af(rsids: list[str], batch: int = 180) -> dict[str, dict]:
+def _ensembl_gnomad_af(rsids: list[str], batch: int = 25) -> dict[str, dict]:
     """rsID -> {alt_allele: (af_all, grpmax_af, grpmax_pop)} from Ensembl's gnomAD frequencies.
 
     Batched POSTs; best-effort with retries — a failed batch costs those variants their AF, not
     the whole step. Only rsIDs leave the machine (same posture as gwas._resolve_rsids). Results
     are cached on disk so re-runs (every weekly refresh) fetch only genuinely new rsIDs.
+
+    Batch size and timeout are empirically pinned, not arbitrary. `pops=1` returns ~120 population
+    records per variant, so the response — not the request count — is the constraint: 25 ids is
+    ~220 KB and answers in 20-36s, while 50 ids reliably times out. The timeout must stay well
+    above that 36s or it rejects responses that were about to succeed. Don't raise `batch`.
     """
     import time
 
@@ -162,7 +167,7 @@ def _ensembl_gnomad_af(rsids: list[str], batch: int = 180) -> dict[str, dict]:
             try:
                 r = httpx.post(ENSEMBL_VARIATION,
                                headers={"Content-Type": "application/json", "Accept": "application/json"},
-                               json={"ids": chunk}, params={"pops": "1"}, timeout=30)
+                               json={"ids": chunk}, params={"pops": "1"}, timeout=90)
                 if r.status_code in (429, 500, 502, 503, 504):  # throttled or unwell — do not hammer
                     raise RuntimeError(f"HTTP {r.status_code}")
                 r.raise_for_status()

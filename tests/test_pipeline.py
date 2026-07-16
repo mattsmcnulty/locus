@@ -641,6 +641,82 @@ def test_study_variants_distinguishes_failure_from_zero(monkeypatch):
     assert "could not be resolved" in res["note"]   # 1 of 2 unresolved is surfaced, not hidden
 
 
+def test_variant_dossier_puts_conflicting_evidence_together(genome):
+    """The dossier exists because the evidence types disagree: an AlphaMissense 'pathogenic' call
+    read alone is alarming, and read next to ClinVar-benign + a 40% allele frequency it's nothing.
+    Reporting them separately is how a confident wrong answer gets made."""
+    from locus import ingest, load, queries
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:
+        con.execute(
+            "INSERT INTO variants (chrom,pos,ref,alt,rsid,gene,gt,clnsig,clnrevstat,am_class,"
+            "am_pathogenicity,gnomad_af) VALUES "
+            "('chr1',900001,'A','G','rs999','BRCA1','0/1','Benign','criteria_provided',"
+            "'likely_pathogenic',0.92,0.41)")
+    d = queries.variant_dossier("rs999")
+    assert d.found and d.zygosity == "heterozygous"
+    # All three signals must arrive together, or the caller can't weigh them.
+    assert d.clinvar == "Benign" and d.alphamissense == "likely_pathogenic" and d.gnomad_af == 0.41
+    assert d.acmg_sf_gene is True, "BRCA1 is ACMG-actionable — that context belongs in the dossier"
+    assert "outranks" in d.note.lower(), "the note must state the precedence, not just the fields"
+
+    # rsID without the 'rs' prefix still resolves.
+    assert queries.variant_dossier("999").found
+
+    # Not found must not read as 'ruled out' — the store only keeps non-reference sites.
+    miss = queries.variant_dossier("rs000000")
+    assert miss.found is False
+    assert "homozygous-reference" in miss.note and "ask_about" in miss.note
+    assert "ruled out" in miss.note
+
+
+def test_report_is_self_contained_and_honest(genome):
+    """The report is the whole product for someone who won't run a CLI or ask an LLM. It gets read
+    without a conversation around it, so it must carry its own caveats — and it must never phone
+    anywhere, since it's a file full of personal genetic data."""
+    from locus import ingest, load, report
+    from locus.config import settings
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    out = report.build()
+    assert out.exists()
+    h = out.read_text()
+
+    # No scripts, no external fetches — it has to work offline forever and leak nothing.
+    for bad in ("<script", "src=\"http", "@import", "https://fonts", ".js\""):
+        assert bad not in h, f"report must be self-contained; found {bad!r}"
+
+    # The caveats are load-bearing, not decoration.
+    for phrase in ("not a medical device", "Not assessed", "SMN1",
+                   "not a clinical carrier screen", "clean bill of health"):
+        assert phrase in h, f"report must state: {phrase!r}"
+    assert "personal genetic data" in h
+
+
+def test_guided_prompts_registered():
+    """Prompts encode which tools to combine and how to frame the answer — the caveats that are
+    easiest to drop when improvising."""
+    import asyncio
+
+    from locus import mcp_server
+
+    prompts = asyncio.run(mcp_server.mcp.list_prompts())
+    pl = prompts.prompts if hasattr(prompts, "prompts") else prompts
+    names = {p.name for p in pl}
+    assert {"annual_review", "new_medication", "family_planning", "explain_variant"} <= names
+    # The family-planning prompt must force the not_assessed caveat.
+    fp = mcp_server.family_planning()
+    assert "not_assessed" in fp and "SMN1" in fp
+    # The medication prompt must forbid reading "No Result" as normal.
+    nm = mcp_server.new_medication("codeine")
+    assert "NOT DETERMINED" in nm and "CYP2D6" in nm
+
+
 def test_carrier_status_zygosity_and_honesty(genome):
     """Carrier = one copy (silent for you, matters for your children). Two copies = possibly
     affected. And the report must ALWAYS name what it cannot assess: SMN1/FMR1 are among the most

@@ -335,6 +335,19 @@ def refresh(
 
 
 @app.command()
+def report(
+    open_it: bool = typer.Option(True, "--open/--no-open", help="Open the report in your browser."),
+) -> None:
+    """Write a self-contained HTML summary of your genome (offline, shareable, no scripts)."""
+    from . import report as _report
+
+    settings.ensure_dirs()
+    out = _report.build()
+    if open_it:
+        subprocess.run(["open", str(out)], check=False)
+
+
+@app.command()
 def literature(
     query: str = typer.Argument(..., help="A gene ('BRCA2'), an rsID ('rs7903146'), or a PubMed ID."),
     since: str = typer.Option("", help="Only papers on/after this ISO date (e.g. 2026-01-01)."),

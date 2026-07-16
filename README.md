@@ -136,6 +136,7 @@ Run any command with `uv run locus <command>` (or activate the venv / add an ali
 | `locus ancestry` | Biogeographic ancestry (PCA + k-NN over 1000G + HGDP) + ancestry-calibrated polygenic risk |
 | `locus traits` | Genotype single-SNP traits/wellness + HLA-B\*57:01 proxy + mtDNA haplogroup |
 | `locus gwas` | Genotype GWAS Catalog risk alleles (p<5e-8) and store the ones you carry |
+| `locus report` | Write a self-contained HTML summary of your genome (offline, no scripts, shareable) |
 | `locus literature <gene\|rsID\|PMID>` | Recent PubMed papers on a gene/rsID, or (for a PubMed ID) which variants that study reported that you carry |
 | `locus refresh [--dry-run] [--force] [--sources clinvar,pgs,cpic,gwas,pubmed,litvar]` | Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis, new PGS, CPIC updates, new GWAS associations at your variants, new LitVar/PubMed papers on your variants & genes) |
 | `locus schedule install [--weekday N] [--hour H]` | Install a weekly macOS launchd job that runs `locus refresh` |
@@ -180,7 +181,10 @@ clients dispatch them reliably):
 **Ancestry & risk** — `ancestry`, `polygenic_risk`
 **Traits & breadth** — `traits`, `gwas_associations`, `ask_about` (paste rsIDs or a trait)
 **Literature** — `literature_for` (recent PubMed on a gene/rsID/topic), `variants_in_study` (which of a paper's variants you carry)
+**Interpretation** — `variant_dossier` (one call: ClinVar + AlphaMissense + gnomAD + GWAS + literature, weighed together)
 **Living updates** — `whats_new` (the ranked changelog from `locus refresh`)
+
+**Guided workflows** (MCP prompts, pick them from Claude's prompt menu): *Annual genome review*, *Before starting a new medication*, *Family planning / carrier check*, *Explain a variant* — each one tells Claude which tools to combine and which caveats not to drop.
 
 Then ask things like:
 - *"Do I carry any pathogenic ClinVar variants? Any ACMG secondary findings?"*

@@ -318,6 +318,95 @@ def variants_in_study(pmid: str) -> StudyVariantsResult:
 
 
 @mcp.tool()
+def variant_dossier(rsid: str) -> queries.VariantDossier:
+    """Everything this genome knows about ONE variant, in a single call: genotype/zygosity, gene,
+    consequence, the ClinVar call and its review status, the AlphaMissense prediction, gnomAD
+    frequency, whether the gene is ACMG-actionable or on the carrier panel, any carried GWAS
+    associations, and a literature link.
+
+    Prefer this over assembling a picture from separate lookups. The evidence types routinely
+    DISAGREE and only mean something together — an AlphaMissense "pathogenic" call looks alarming
+    until you see ClinVar calls it benign and 40% of people carry it. Precedence: ClinVar (with its
+    review status) outranks AlphaMissense, which is a prediction and never overrides a benign call;
+    a high gnomAD frequency argues strongly against a severe effect regardless of prediction. If
+    the fields conflict, say so rather than reporting the scariest one. A variant not found is
+    almost certainly homozygous-reference, not 'ruled out'."""
+    err = _require_db()
+    if err:
+        return queries.VariantDossier(rsid=rsid, found=False, literature_url="", note=err)
+    return queries.variant_dossier(rsid)
+
+
+# ── Guided workflows ─────────────────────────────────────────────────────────────
+# Prompts, not tools: they don't fetch anything, they tell Claude which tools to combine and how
+# to frame the answer. Each encodes the caveats that are easy to omit when improvising, and the
+# ordering that keeps a weak signal from being reported like a strong one.
+@mcp.prompt(title="Annual genome review")
+def annual_review() -> str:
+    """A yearly pass over what's changed and what matters."""
+    return (
+        "Give me an annual review of my genome. Please:\n"
+        "1. `whats_new` first — what changed since the last review (ClinVar reclassifications rank "
+        "above everything else; new literature is context, not news).\n"
+        "2. `secondary_findings` (ACMG-actionable) and `carrier_status`. For carrier_status, "
+        "always report its `not_assessed` list — an empty result is not a negative screen.\n"
+        "3. `pharmacogenomics` — flag anything relevant to medications I might be prescribed.\n"
+        "4. `polygenic_risk` — percentiles only, and only within my matched ancestry.\n"
+        "Lead with anything actionable. If nothing is actionable, say that plainly rather than "
+        "padding. Be explicit about what this review cannot see (non-coding, structural, repeat "
+        "expansions, anything ClinVar hasn't classified). Not medical advice."
+    )
+
+
+@mcp.prompt(title="Before starting a new medication")
+def new_medication(drug: str = "") -> str:
+    """Check a drug against this genome's pharmacogenomics."""
+    d = drug or "the drug I name"
+    return (
+        f"I may be prescribed {d}. Check my genome:\n"
+        f"1. `pharmacogenomics` filtered by that drug, and by the gene that metabolizes it.\n"
+        f"2. Report my diplotype and metabolizer phenotype, then the CPIC/DPWG guidance verbatim "
+        f"rather than paraphrasing dosing advice.\n"
+        f"3. If the gene reports 'Unknown' or 'No Result' (CYP2D6 often does — it needs "
+        f"copy-number data from raw reads that Locus does not process), say the result is NOT "
+        f"DETERMINED. Never present that as 'normal'.\n"
+        f"This is decision-support for a prescriber, not a reason to change any dose myself."
+    )
+
+
+@mcp.prompt(title="Family planning / carrier check")
+def family_planning() -> str:
+    """Carrier status framed for a couple, not for me."""
+    return (
+        "Walk me through my carrier status for family planning.\n"
+        "1. `carrier_status`. Explain that carrier = one copy = typically silent for me, and that "
+        "it only matters if a partner carries the same condition (1-in-4 risk per pregnancy).\n"
+        "2. Report the `not_assessed` list prominently — SMN1 (spinal muscular atrophy) and FMR1 "
+        "(Fragile X) are among the most important screens offered and this data CANNOT answer "
+        "them. Do not let an empty result read as a clean screen.\n"
+        "3. Note that this is a curated panel, not a clinical carrier screen (ACMG's is 113 genes).\n"
+        "Recommend real carrier screening through a clinician or genetic counselor — for both "
+        "partners — rather than treating this as a substitute."
+    )
+
+
+@mcp.prompt(title="Explain a variant")
+def explain_variant(rsid: str = "") -> str:
+    """Interpret one variant with the evidence weighed correctly."""
+    r = rsid or "the rsID I give you"
+    return (
+        f"Explain what {r} means for me. Call `variant_dossier` first — it returns the ClinVar "
+        f"call, the AlphaMissense prediction, and the gnomAD frequency together, which is the "
+        f"only way to read them. Weigh them in that order: ClinVar (check its review status) "
+        f"outranks AlphaMissense, which is a computational prediction that is frequently wrong "
+        f"and never overrides a benign clinical call; a high population frequency argues against "
+        f"a severe effect whatever the prediction says. If they conflict, tell me they conflict. "
+        f"If it isn't found, that means homozygous-reference, not 'ruled out' — confirm with "
+        f"`ask_about`. Then use `literature_for` if recent research would add anything."
+    )
+
+
+@mcp.tool()
 def run_sql(query: str) -> dict:
     """Run a read-only SELECT against the genome database for power queries. Tables: variants
     (chrom,pos,ref,alt,rsid,gt,filter,gene,consequence,clnsig,clndn,clnrevstat,gnomad_af,gnomad_af_grpmax,

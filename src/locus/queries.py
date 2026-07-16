@@ -615,6 +615,99 @@ class AskResult(BaseModel):
     note: str
 
 
+class VariantDossier(BaseModel):
+    rsid: str
+    found: bool = Field(description="False = no record in this genome's variant table")
+    gene: str | None = None
+    genotype: str | None = None
+    zygosity: str | None = Field(default=None, description="heterozygous | homozygous-alternate | homozygous-reference")
+    consequence: str | None = None
+    clinvar: str | None = Field(default=None,
+                                description="CLINICAL evidence — the strongest signal here")
+    clinvar_disease: str | None = None
+    clinvar_review: str | None = Field(default=None,
+                                       description="ClinVar review status (stars) — how far to trust the call")
+    alphamissense: str | None = Field(default=None,
+                                      description="A COMPUTATIONAL prediction, far weaker than a ClinVar call")
+    alphamissense_score: float | None = None
+    gnomad_af: float | None = Field(default=None,
+                                    description="Global allele frequency. Common = unlikely to be severe")
+    gnomad_af_grpmax: float | None = None
+    acmg_sf_gene: bool = Field(default=False,
+                               description="Gene is on the ACMG SF v3.3 medically-actionable list")
+    carrier_condition: str | None = Field(default=None,
+                                          description="Recessive condition, if the gene is on the carrier panel")
+    gwas_associations: list[Association] = Field(default_factory=list)
+    trait: TraitResult | None = None
+    literature_url: str
+    note: str
+
+
+def _zygosity(gt: str | None) -> str | None:
+    if not gt:
+        return None
+    a = [x for x in re.split(r"[/|]", gt) if x not in ("", ".")]
+    if len(a) < 2:
+        return None
+    if a[0] == a[1]:
+        return "homozygous-reference" if a[0] == "0" else "homozygous-alternate"
+    return "heterozygous"
+
+
+def variant_dossier(rsid: str) -> VariantDossier:
+    """Everything this genome knows about one variant, in a single call.
+
+    Exists because the evidence types disagree and only mean something together: an
+    AlphaMissense-"pathogenic" call looks alarming until you see ClinVar says benign and 40% of
+    people carry it. Assembling that picture from separate tools invites a confident wrong answer,
+    so the dossier puts the contradicting fields side by side and states the precedence.
+    """
+    from .panels import ACMG_SF_GENES, CARRIER_PANEL
+
+    rsid = rsid.strip()
+    if not rsid.lower().startswith("rs"):
+        rsid = "rs" + rsid
+    litvar = f"https://www.ncbi.nlm.nih.gov/research/litvar2/docsum?text={rsid}"
+
+    page = lookup_by_rsid(rsid, limit=1)
+    if not page.hits:
+        return VariantDossier(
+            rsid=rsid, found=False, literature_url=litvar,
+            note=(f"{rsid} has no record in this genome's variant table. That almost always means "
+                  f"homozygous-reference (the store keeps non-reference sites, so hom-ref calls "
+                  f"simply aren't rows) — it does NOT mean the variant was ruled out or that the "
+                  f"lookup failed. Use `ask_about` with this rsID to genotype the position live "
+                  f"and be certain before telling anyone they 'don't have' it."))
+
+    v = page.hits[0]
+    gene = (v.gene or "").upper() or None
+    assoc = gwas_associations(limit=25)
+    carried = [a for a in assoc.hits if a.rsid == rsid]
+    tr = next((t for t in traits().traits if t.rsid == rsid), None)
+    cond = next((c.condition for c in CARRIER_PANEL if gene and c.gene == gene), None)
+
+    note = (
+        "Weigh these together — they routinely disagree, and the order matters. ClinVar is a "
+        "clinical assertion and outranks everything else here; check its review status (a "
+        "no-assertion call is weak). AlphaMissense is a computational prediction that is wrong "
+        "often and NEVER overrides a ClinVar benign call. A high gnomAD frequency is strong "
+        "evidence against a severe effect no matter what the prediction says: a variant carried "
+        "by a large fraction of people is not causing a severe disease in all of them. GWAS hits "
+        "are weak single associations and must not be summed. If the fields conflict, say so "
+        "rather than picking the scariest one. Not diagnostic — confirm anything health-relevant "
+        "with a clinician or genetic counselor."
+    )
+    return VariantDossier(
+        rsid=rsid, found=True, gene=v.gene, genotype=v.gt, zygosity=_zygosity(v.gt),
+        consequence=v.consequence, clinvar=v.clnsig,
+        clinvar_disease=(v.clndn or "").replace("_", " ") or None, clinvar_review=v.clnrevstat,
+        alphamissense=v.am_class, alphamissense_score=v.am_pathogenicity,
+        gnomad_af=v.gnomad_af, gnomad_af_grpmax=v.gnomad_af_grpmax,
+        acmg_sf_gene=bool(gene and gene in ACMG_SF_GENES), carrier_condition=cond,
+        gwas_associations=carried, trait=tr, literature_url=litvar, note=note,
+    )
+
+
 def overview() -> dict:
     """Summary stats about the loaded genome (counts, build, annotation coverage)."""
     with connect(read_only=True) as con:

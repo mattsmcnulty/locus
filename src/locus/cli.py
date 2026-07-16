@@ -154,7 +154,59 @@ def doctor() -> None:
         "[green]ok[/]" if settings.db_path.exists() else "[yellow]not built[/]",
         str(settings.db_path) if settings.db_path.exists() else "run `locus setup` (or `locus pipeline`)",
     )
+
+    # Coverage, not just file existence. Every annotation step self-skips when its inputs are
+    # missing, so the store can be fully built and still have a column that is 100% NULL — a
+    # feature that silently answers nothing. Checking files alone reports that as green.
+    if settings.db_path.exists():
+        for (check, status), detail in _coverage_rows():
+            table.add_row(check, status, detail)
     console.print(table)
+
+
+# What each variant column powers, and which step fills it — so a gap names its own fix.
+_COVERAGE_CHECKS = (
+    ("consequence", "SnpEff", "consequences + gene names", "locus annotate --steps snpeff"),
+    ("gene", "SnpEff", "gene lookups, literature watch", "locus annotate --steps snpeff"),
+    ("clnsig", "ClinVar", "clinical + secondary findings", "locus annotate --steps clinvar"),
+    ("am_class", "AlphaMissense", "predicted_damaging", "locus annotate --steps alphamissense"),
+    ("gnomad_af", "gnomAD/Ensembl", "allele_frequency, rarity filter", "locus annotate --steps gnomad"),
+)
+
+
+def _coverage_rows() -> list[tuple[tuple[str, str], str]]:
+    """Report how much of the store each annotation actually populated."""
+    from .db import connect
+
+    rows: list[tuple[tuple[str, str], str]] = []
+    try:
+        with connect(read_only=True) as con:
+            total = con.execute("SELECT count(*) FROM variants").fetchone()[0]
+            if not total:
+                return [(("variant coverage", "[yellow]empty[/]"), "no variants loaded — run `locus load`")]
+            for col, step, powers, fix in _COVERAGE_CHECKS:
+                try:
+                    n = con.execute(f"SELECT count({col}) FROM variants").fetchone()[0]
+                except Exception:  # noqa: BLE001 - column absent on an older store
+                    n = 0
+                pct = 100 * n / total
+                if n == 0:
+                    status, detail = "[red]NOT APPLIED[/]", f"{step} produced nothing → {powers} dead. Fix: {fix}"
+                else:
+                    status, detail = "[green]ok[/]", f"{n:,}/{total:,} ({pct:.1f}%) — {step}"
+                rows.append(((f"  ↳ {col}", status), detail))
+            # Deep-interpretation tables are written by their own steps and preserved across reloads.
+            for tbl, fix in (("pgs_scores", "locus ancestry"), ("traits", "locus traits"),
+                             ("associations", "locus gwas")):
+                try:
+                    n = con.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
+                except Exception:  # noqa: BLE001
+                    n = 0
+                rows.append(((f"  ↳ {tbl}", "[green]ok[/]" if n else "[yellow]empty[/]"),
+                             f"{n:,} rows" if n else f"not populated — run `{fix}`"))
+    except Exception as e:  # noqa: BLE001 - never let doctor itself blow up
+        return [(("variant coverage", "[yellow]unreadable[/]"), str(e)[:60])]
+    return rows
 
 
 @app.command()

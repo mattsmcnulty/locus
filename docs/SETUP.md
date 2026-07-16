@@ -2,7 +2,7 @@
 
 This guide gets Locus running on your own Mac so you can ask **Claude** about your
 [sequencing.com](https://sequencing.com) whole-genome data. It's a one-time, ~20–40 minute
-setup, and **everything stays on your computer** — nothing is uploaded anywhere.
+setup, and **your genome stays on your computer** — your DNA data is never uploaded.
 
 **You need:** an **Apple Silicon Mac** (M1/M2/M3/M4), **Claude Desktop** (or Claude Code)
 installed, ~25 GB of free disk, and your sequencing.com 30× WGS files.
@@ -74,4 +74,12 @@ Locus is for **personal exploration and education. It is not medical advice and 
 device.** Polygenic risk percentiles are research-grade estimates and only meaningful within a
 matched ancestry; single-variant ("GWAS") associations are weak; the HLA-B\*57:01 result is a
 screening proxy. **Discuss anything health-relevant with a qualified clinician or genetic
-counselor.** Your genetic data never leaves your Mac.
+counselor.**
+
+**What leaves your Mac:** your genome file never does, and neither do your genotypes — all
+matching against your DNA happens locally. Locus does look things up in public databases
+(Ensembl, NCBI PubMed/LitVar, the GWAS Catalog), and those lookups send *public identifiers*:
+variant IDs (like `rs1800896`) and gene names (like `BRCA2`). Which identifiers get looked up
+is chosen based on your variants, so that choice reflects your genome even though no genotype
+is sent. If you'd rather make no outbound calls at all, skip `locus refresh` and the
+`literature`/`ask_about` tools — the rest of Locus works entirely offline.

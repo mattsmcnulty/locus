@@ -210,10 +210,20 @@ def write_ancestry(ancestry_result, pgs_scores: list) -> None:
 
     con = _d.connect(str(settings.db_path))
     try:
-        # Drop+recreate (tolerates schema changes), then repopulate.
-        for t in ("ancestry_global", "ancestry_pca", "pgs_scores"):
+        # Drop ONLY what we're about to repopulate. An empty input means the upstream step
+        # failed (e.g. every curated PGS download errored — pgs.run swallows per-score
+        # exceptions and returns []), not that the true answer is "none". Dropping on that
+        # would erase a good table while the caller still prints a green success line.
+        drop = (["ancestry_global", "ancestry_pca"] if ancestry_result is not None else [])
+        drop += ["pgs_scores"] if pgs_scores else []
+        for t in drop:
             con.execute(f"DROP TABLE IF EXISTS {t}")
         _create_schema(con)
+        if ancestry_result is None:
+            console.print("[yellow]Ancestry: no result — keeping the existing ancestry tables.[/]")
+        if not pgs_scores:
+            console.print("[yellow]Polygenic scores: none computed — keeping the existing "
+                          "pgs_scores table rather than replacing it with nothing.[/]")
         if ancestry_result is not None:
             from .ancestry import POPULATIONS, SUPERPOPS
 
@@ -265,19 +275,28 @@ def write_traits(results: list) -> None:
 
 def write_associations(carried: list) -> None:
     """Replace the ``associations`` table with carried GWAS risk alleles. Standalone step
-    (``locus gwas``); leaves variant tables intact."""
+    (``locus gwas``); leaves variant tables intact.
+
+    Refuses to replace existing rows with nothing: an empty ``carried`` means the upstream
+    genotyping produced no calls (a bcftools/network hiccup), not that the genome suddenly
+    carries zero associations. Dropping on that would silently erase the table — and, via
+    ``refresh._reanalyze_gwas``, make the next diff see `prev -> 0` and report no findings.
+    """
     import duckdb as _d
 
+    if not carried:
+        console.print("[yellow]GWAS: computed 0 carried associations — keeping the existing table "
+                      "rather than replacing it with nothing.[/]")
+        return
     con = _d.connect(str(settings.db_path))
     try:
         con.execute("DROP TABLE IF EXISTS associations")
         _create_schema(con)
-        if carried:
-            con.executemany(
-                "INSERT INTO associations VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                [(c.rsid, c.chrom, c.pos, c.risk_allele, c.dosage, c.zygosity, c.trait,
-                  c.mapped_trait, c.pval, c.or_beta, c.pmid) for c in carried],
-            )
+        con.executemany(
+            "INSERT INTO associations VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [(c.rsid, c.chrom, c.pos, c.risk_allele, c.dosage, c.zygosity, c.trait,
+              c.mapped_trait, c.pval, c.or_beta, c.pmid) for c in carried],
+        )
     finally:
         con.close()
 

@@ -533,6 +533,99 @@ def test_pubmed_findings_dedup(genome, monkeypatch):
     assert check2["new_pmids"] == ["NEW1"]         # …but still record the unseen PMID
 
 
+def test_acmg_panel_matches_v33():
+    """The ACMG SF panel is the whole basis of `secondary_findings`, whose empty result is
+    reported to the user as reassuring. A gene missing here is a screen that silently never
+    happens. Pinned to ACMG SF v3.3 (84 genes; Lee K, et al. Genet Med. 2025;27(8):101454)."""
+    from locus.panels import ACMG_SF_GENES, ACMG_SF_RECESSIVE, ACMG_SF_VERSION
+
+    assert ACMG_SF_VERSION == "v3.3"
+    assert len(ACMG_SF_GENES) == 84, "v3.3 is exactly 84 genes"
+    # Regression: these four (calmodulinopathy / CPVT — sudden cardiac death) were absent,
+    # so a pathogenic variant in them returned "no findings" and Claude reassured the user.
+    for g in ("CALM1", "CALM2", "CALM3", "TRDN"):
+        assert g in ACMG_SF_GENES, f"{g} is on ACMG SF v3.3"
+    for g in ("ABCD1", "CYP27A1", "PLN"):   # added in v3.3
+        assert g in ACMG_SF_GENES
+    # CDH1 is not an ACMG SF gene at any version — carrying it made the panel not-ACMG-SF.
+    assert "CDH1" not in ACMG_SF_GENES
+    assert ACMG_SF_RECESSIVE <= ACMG_SF_GENES, "recessive genes must be part of the panel"
+    assert {"MUTYH", "HFE", "ATP7B"} <= ACMG_SF_RECESSIVE
+
+
+def test_predicted_damaging_excludes_clinvar_classified(genome):
+    """The tool's whole premise is the 'ClinVar is silent' set. Without a clnsig IS NULL filter it
+    returned ClinVar-BENIGN variants as damaging findings ClinVar had missed — a false alarm on
+    health data, stated confidently to Claude."""
+    from locus import ingest, load, queries
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:
+        con.executemany(
+            "INSERT INTO variants (chrom,pos,ref,alt,gene,clnsig,am_class) VALUES (?,?,?,?,?,?,?)",
+            [("chr1", 900001, "A", "G", "GENEA", None, "likely_pathogenic"),       # silent -> include
+             ("chr1", 900002, "A", "G", "GENEB", "Benign", "likely_pathogenic"),   # benign  -> EXCLUDE
+             ("chr1", 900003, "A", "G", "GENEC", "Pathogenic", "likely_pathogenic")],  # known -> exclude
+        )
+    hits = queries.predicted_damaging(limit=50).hits
+    genes = {h.gene for h in hits}
+    assert "GENEA" in genes
+    assert "GENEB" not in genes, "ClinVar-benign must never be reported as predicted-damaging"
+    assert "GENEC" not in genes, "ClinVar already classified it — not the 'silent' set"
+    assert all(h.clnsig is None for h in hits)
+
+
+def test_secondary_findings_recessive_gating(genome):
+    """ACMG reports its recessive genes only when two P/LP variants are present. A single het
+    carrier (HFE p.C282Y is ~10% of Europeans) is not a secondary finding."""
+    from locus import ingest, load, queries
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:
+        con.executemany(
+            "INSERT INTO variants (chrom,pos,ref,alt,gene,clnsig,gt) VALUES (?,?,?,?,?,?,?)",
+            [("chr6", 26090951, "G", "A", "HFE", "Pathogenic", "0/1"),      # lone het carrier -> excluded
+             ("chr11", 108100000, "C", "T", "ATM", "Pathogenic", "0/1"),    # not on ACMG SF -> excluded
+             ("chr17", 43000000, "A", "G", "BRCA1", "Pathogenic", "0/1")],  # dominant het -> reported
+        )
+    genes = {h.gene for h in queries.secondary_findings().hits}
+    assert "BRCA1" in genes, "dominant gene: a single P/LP het is a real finding"
+    assert "HFE" not in genes, "recessive gene: a lone het carrier is not an ACMG secondary finding"
+    assert "ATM" not in genes
+
+    # Homozygous in a recessive gene IS biallelic -> report it.
+    with connect(read_only=False) as con:
+        con.execute("UPDATE variants SET gt='1/1' WHERE gene='HFE'")
+    assert "HFE" in {h.gene for h in queries.secondary_findings().hits}
+
+
+def test_write_associations_refuses_to_wipe(genome):
+    """DROP was unconditional while INSERT was guarded, so an empty compute (a bcftools/network
+    hiccup) silently erased a populated table — and the next refresh diff then saw prev->0 and
+    reported nothing wrong."""
+    from locus import gwas, ingest, load
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    carried = [gwas.Carried("rs1", "chr1", 1, "A", 1, "heterozygous", "T", "t", 1e-9, "1.2", "123")]
+    load.write_associations(carried)
+    with connect(read_only=True) as con:
+        assert con.execute("SELECT count(*) FROM associations").fetchone()[0] == 1
+
+    load.write_associations([])   # must NOT erase the good table
+    with connect(read_only=True) as con:
+        assert con.execute("SELECT count(*) FROM associations").fetchone()[0] == 1, \
+            "an empty result means upstream failed, not that you carry zero associations"
+
+
 def test_gnomad_scope_expression(tmp_path, monkeypatch):
     """AF is only fetched where it can change an answer (AlphaMissense-pathogenic / non-benign
     ClinVar). Scoping is what keeps this ~1k rsIDs against a rate-limited public API instead of

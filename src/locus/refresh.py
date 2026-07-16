@@ -12,8 +12,10 @@ that became (or stopped being) pathogenic. The diff is naturally restricted to c
 positions because it compares the genome's own ``variants.clnsig`` before vs after a
 re-annotate + reload — reusing the existing pipeline rather than re-implementing it.
 
-Privacy: every outbound call sends only generic queries (release dates, public md5s,
-score IDs). The genome never leaves the machine; all matching is local.
+Privacy: outbound calls send only public identifiers — release dates, md5s, score IDs, and
+(for the literature watchers) the gene symbols and rsIDs at which this genome carries a
+notable variant. Those identifiers are selected by your genotypes, but no genotype, and no
+part of the VCF, is ever transmitted; all matching against the genome happens locally.
 """
 
 from __future__ import annotations

@@ -13,9 +13,11 @@ the variants *you* carry — all on your machine. It's exposed two ways:
 2. **A local debug SPA** (React) for browsing and visualizing the same data.
 
 > ⚠️ **This is sensitive personal genetic data.** Everything under `data/` is `.gitignore`d
-> and never committed. The MCP server and the SPA bind to **localhost only**, and the refresh
-> engine and literature lookups send only *generic* queries outward (release dates, public score
-> IDs, rsID lists, and gene symbols) — your genome never leaves the machine.
+> and never committed. The MCP server and the SPA bind to **localhost only**. Your genome file
+> and your genotypes never leave the machine — all matching happens locally. The refresh engine
+> and literature lookups do send *public identifiers* outward (release dates, score IDs, rsIDs,
+> gene symbols); which ones are sent is selected by your variants, so treat that as metadata
+> about your genome even though no genotype is transmitted. See [Privacy & data](#privacy--data).
 
 ---
 
@@ -38,7 +40,7 @@ need the BAM/CRAM and are not yet implemented.)
 
 | Area | Capability |
 | --- | --- |
-| **Clinical** | ClinVar pathogenic / likely-pathogenic variants you carry; **ACMG SF v3.2** secondary findings in the ~81 medically-actionable genes |
+| **Clinical** | ClinVar pathogenic / likely-pathogenic variants you carry; **ACMG SF v3.3** secondary findings in the 84 medically-actionable genes |
 | **Predicted impact** | **AlphaMissense** scores for missense variants ClinVar has never classified (the `clnsig = null ≠ benign` gap) |
 | **Pharmacogenomics** | **PharmCAT** star-allele diplotypes, metabolizer phenotypes, and CPIC/DPWG drug guidance |
 | **Ancestry** | Biogeographic ancestry via PCA + k-NN over 1000 Genomes + HGDP — continental and sub-continental |

@@ -156,10 +156,15 @@ def predicted_damaging(
 ) -> VariantPage:
     """Rare, predicted-damaging missense variants (AlphaMissense pathogenic + rare/unannotated).
 
-    This is the 'ClinVar is silent' set — variants ClinVar has never classified but AlphaMissense
-    scores as likely damaging. Defaults to allele frequency < 1%.
+    The 'ClinVar is silent' set — variants ClinVar has never classified but AlphaMissense scores as
+    likely damaging. ``clnsig IS NULL`` is what makes that true and is not optional: without it a
+    third of the results are variants ClinVar *has* seen, including ones it calls **benign**, and
+    they get reported as damaging findings ClinVar supposedly missed.
+
+    Rarity (default AF < 1%) is best-effort: gnomAD AF is only carried for variants where rarity is
+    informative, so `gnomad_af IS NULL` is admitted rather than dropping unscored variants entirely.
     """
-    where = ["am_class LIKE '%pathogenic%'", "(gnomad_af IS NULL OR gnomad_af < ?)"]
+    where = ["am_class LIKE '%pathogenic%'", "clnsig IS NULL", "(gnomad_af IS NULL OR gnomad_af < ?)"]
     params: list = [max_af]
     if gene:
         where.append("upper(gene) = upper(?)")
@@ -173,15 +178,33 @@ def allele_frequency(region_or_variant: str) -> VariantPage:
 
 
 def secondary_findings(limit: int = 100, offset: int = 0) -> VariantPage:
-    """ACMG SF v3.2 secondary findings: pathogenic / likely-pathogenic ClinVar variants in
-    the medically-actionable gene set. 'No findings' is a defensible, reassuring result."""
-    from .panels import ACMG_SF_GENES
+    """ACMG SF secondary findings: pathogenic / likely-pathogenic ClinVar variants in the
+    medically-actionable gene set. 'No findings' is a defensible, reassuring result.
+
+    ACMG reports its recessive genes only when TWO P/LP variants are present, so a lone
+    heterozygous carrier is excluded — otherwise common carrier states (HFE p.C282Y sits in ~10%
+    of Europeans) would surface as actionable findings and generate false alarms.
+    """
+    from .panels import ACMG_SF_GENES, ACMG_SF_RECESSIVE
 
     genes = sorted(ACMG_SF_GENES)
     placeholders = ", ".join("?" for _ in genes)
-    where = ("(lower(clnsig) LIKE '%pathogenic%' AND lower(clnsig) NOT LIKE '%benign%' "
-             f"AND lower(clnsig) NOT LIKE '%conflicting%') AND upper(gene) IN ({placeholders})")
-    return _var_select(where, [g.upper() for g in genes], limit, offset)
+    plp = ("(lower(clnsig) LIKE '%pathogenic%' AND lower(clnsig) NOT LIKE '%benign%' "
+           "AND lower(clnsig) NOT LIKE '%conflicting%')")
+    rec = sorted(ACMG_SF_RECESSIVE)
+    rec_ph = ", ".join("?" for _ in rec)
+    # Dominant genes: any P/LP. Recessive genes: only if biallelic — homozygous (gt not 0/x),
+    # or ≥2 P/LP variants in that same gene (presumed compound het; phase is unknown from a VCF).
+    where = (
+        f"{plp} AND upper(gene) IN ({placeholders}) AND ("
+        f"  upper(gene) NOT IN ({rec_ph})"
+        f"  OR gt IN ('1/1', '1|1')"
+        f"  OR (SELECT count(*) FROM variants v2 WHERE upper(v2.gene) = upper(variants.gene)"
+        f"      AND {plp.replace('clnsig', 'v2.clnsig')}) >= 2"
+        f")"
+    )
+    params = [g.upper() for g in genes] + [g.upper() for g in rec]
+    return _var_select(where, params, limit, offset)
 
 
 def pharmacogenomics(gene: str | None = None, drug: str | None = None) -> PgxResult:
@@ -266,7 +289,7 @@ def run_sql(sql: str, max_rows: int = 200) -> dict:
 class AncestryComponent(BaseModel):
     code: str
     name: str
-    proportion: float = Field(description="Fraction (0-1); k-NN estimate over 1000 Genomes")
+    proportion: float = Field(description="Fraction (0-1); k-NN estimate over 1000 Genomes + HGDP")
 
 
 class PcaPoint(BaseModel):
@@ -279,10 +302,11 @@ class PcaPoint(BaseModel):
 
 class AncestrySummary(BaseModel):
     components: list[AncestryComponent]      # continental rollup
-    populations: list[AncestryComponent]     # sub-continental (fine 1000 Genomes populations)
+    populations: list[AncestryComponent]     # sub-continental (fine 1000 Genomes + HGDP populations)
     pca: list[PcaPoint]
     note: str = (
-        "k-NN placement among 1000 Genomes populations. Continental ancestry is robust; the "
+        "k-NN placement among 1000 Genomes + HGDP reference populations (so fine labels include HGDP "
+        "groups such as French, Orcadian, Sardinian, Basque). Continental ancestry is robust; the "
         "sub-continental breakdown is 'genetically closest to' (sensitive to reference panel sizes), "
         "not a calibrated admixture percentage — and far coarser than 23andMe's proprietary panels."
     )
@@ -400,7 +424,7 @@ def whats_new(since: str | None = None, tier: str | None = None, limit: int = 20
 
 class TraitResult(BaseModel):
     rsid: str
-    category: str = Field(description="wellness | pharmacogenomic")
+    category: str = Field(description="wellness | pharmacogenomic | maternal lineage (the mtDNA haplogroup)")
     trait: str
     genotype: str = Field(description="Observed genotype, e.g. 'A/G'; '—' if not callable")
     dosage: int | None = Field(default=None, description="Effect-allele copies (0/1/2)")

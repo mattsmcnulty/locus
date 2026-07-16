@@ -86,7 +86,7 @@ def lookup_variant_by_rsid(rsid: str) -> queries.VariantPage:
 @mcp.tool()
 def lookup_variants_in_gene(gene: str, limit: int = 100, offset: int = 0) -> queries.VariantPage:
     """List variants in a gene by HGNC symbol (e.g. 'BRCA1'). Paginated — pass offset to page.
-    `total` is the full match count. Requires gene annotation (VEP/SnpEff) to be loaded."""
+    `total` is the full match count. Requires the SnpEff annotation step to have run."""
     return queries.lookup_by_gene(gene, limit=limit, offset=offset)
 
 
@@ -111,6 +111,8 @@ def clinical_findings(gene: str = "", significance: str = "", limit: int = 100, 
 def pharmacogenomics(gene: str = "", drug: str = "") -> queries.PgxResult:
     """Pharmacogenomic results from PharmCAT: star-allele diplotypes, metabolizer phenotypes, and
     CPIC/DPWG drug guidance. Filter by `gene` (e.g. 'CYP2C19') or `drug` (e.g. 'clopidogrel').
+    Some genes report 'Unknown'/'No Result' — notably CYP2D6, whose calling needs copy-number data
+    from raw reads that Locus does not process. Treat those as "not determined", not "normal".
     Requires the PharmCAT annotation step to have run."""
     return queries.pharmacogenomics(gene=gene or None, drug=drug or None)
 
@@ -135,8 +137,11 @@ def structural_variants(region: str, limit: int = 100) -> StructuralVariantsResu
 @mcp.tool()
 def predicted_damaging(gene: str = "", limit: int = 100) -> queries.VariantPage:
     """Rare, predicted-damaging missense variants from AlphaMissense — the 'ClinVar is silent' set:
-    variants ClinVar never classified but AlphaMissense scores as likely pathogenic (and rare, AF<1%).
-    Optionally filter by gene. Use this when ClinVar returns nothing for a gene of interest."""
+    variants ClinVar has NOT classified but AlphaMissense scores as likely pathogenic. Optionally
+    filter by gene. Use this when ClinVar returns nothing for a gene of interest. These are
+    computational predictions, not clinical assertions — far weaker evidence than a ClinVar
+    pathogenic call, and most are benign in reality. Rarity filtering is best-effort: gnomAD
+    frequencies are only carried for some variants, so a hit is not guaranteed to be rare."""
     err = _require_db()
     if err:
         return {"error": err}  # type: ignore[return-value]
@@ -145,9 +150,12 @@ def predicted_damaging(gene: str = "", limit: int = 100) -> queries.VariantPage:
 
 @mcp.tool()
 def secondary_findings(limit: int = 100) -> queries.VariantPage:
-    """ACMG SF v3.2 secondary (incidental) findings: pathogenic / likely-pathogenic ClinVar variants
-    in the ~81 medically-actionable genes ACMG recommends reporting (cancer, cardiac, metabolic).
-    Empty is the common, reassuring result. Always confirm any hit clinically."""
+    """ACMG SF v3.3 secondary (incidental) findings: pathogenic / likely-pathogenic ClinVar variants
+    in the 84 medically-actionable genes ACMG recommends reporting (cancer, cardiac, metabolic).
+    ACMG's recessive genes are reported only when two P/LP variants are present, so single carriers
+    are excluded by design. Empty is the common, reassuring result — but it means "no P/LP ClinVar
+    variant in these 84 genes", NOT a clean bill of health: it cannot see variants ClinVar hasn't
+    classified, non-coding or structural variants, or any gene off this list. Confirm hits clinically."""
     err = _require_db()
     if err:
         return queries.VariantPage(total=0, limit=limit, offset=0, hits=[])
@@ -156,9 +164,11 @@ def secondary_findings(limit: int = 100) -> queries.VariantPage:
 
 @mcp.tool()
 def traits(category: str = "") -> queries.TraitsReport:
-    """Single-SNP traits/wellness (lactose, caffeine, alcohol flush, earwax, eye color, muscle type)
-    plus the HLA-B*57:01 abacavir-hypersensitivity screening proxy. Filter by `category`
-    ('wellness'|'pharmacogenomic'). Informational, not diagnostic. Requires `locus traits` to have run."""
+    """Single-SNP traits/wellness (lactose, caffeine, alcohol flush, earwax, eye color, muscle type),
+    the HLA-B*57:01 abacavir-hypersensitivity screening proxy, and the mtDNA maternal-lineage
+    haplogroup. Filter by `category`: 'wellness' | 'pharmacogenomic' | 'maternal lineage' (the
+    haplogroup lives under the last one). Call with no filter to see everything. Informational,
+    not diagnostic. Requires `locus traits` to have run."""
     err = _require_db()
     if err:
         return queries.TraitsReport(total=0, traits=[])
@@ -167,7 +177,7 @@ def traits(category: str = "") -> queries.TraitsReport:
 
 @mcp.tool()
 def ancestry() -> queries.AncestrySummary:
-    """Estimated biogeographic ancestry: continental proportions (k-NN over 1000 Genomes) and the
+    """Estimated biogeographic ancestry: continental proportions (k-NN over 1000 Genomes + HGDP) and the
     PCA placement. Continental ancestry is reliable; finer/admixed breakdowns are approximate.
     Requires `locus ancestry` to have run."""
     err = _require_db()
@@ -178,7 +188,8 @@ def ancestry() -> queries.AncestrySummary:
 
 @mcp.tool()
 def polygenic_risk() -> PolygenicRiskReport:
-    """Polygenic (aggregate) risk scores for common traits (CAD, LDL, T2D, AFib, Lp(a)), reported as
+    """Polygenic (aggregate) risk scores for the curated set (coronary artery disease, LDL
+    cholesterol, type 2 diabetes, Lp(a)) — call it to see what is actually scored, reported as
     an ancestry-matched percentile where available. Percentiles are only meaningful within the matched
     ancestry; these are research-grade estimates, not diagnoses. Requires `locus ancestry` to have run."""
     err = _require_db()
@@ -290,8 +301,10 @@ def variants_in_study(pmid: str) -> StudyVariantsResult:
 @mcp.tool()
 def run_sql(query: str) -> dict:
     """Run a read-only SELECT against the genome database for power queries. Tables: variants
-    (chrom,pos,ref,alt,rsid,gt,filter,gene,consequence,clnsig,clndn,clnrevstat,gnomad_af,gnomad_af_grpmax),
-    cnv, sv, pgx_genes, pgx_drugs, meta. Mutating statements are rejected; results capped at 200 rows."""
+    (chrom,pos,ref,alt,rsid,gt,filter,gene,consequence,clnsig,clndn,clnrevstat,gnomad_af,gnomad_af_grpmax,
+    am_pathogenicity,am_class), cnv, sv, pgx_genes, pgx_drugs, meta, traits, associations (carried GWAS
+    hits), pgs_scores, ancestry_global, ancestry_pca, watch_findings (the refresh changelog),
+    watch_seen_ids, sources. Mutating statements are rejected; results capped at 200 rows."""
     err = _require_db()
     if err:
         return {"error": err}

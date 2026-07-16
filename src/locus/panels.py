@@ -2,10 +2,11 @@
 
 Two things live here:
 
-1. ``ACMG_SF_GENES`` — the ACMG SF v3.2 medically-actionable "secondary findings"
-   genes. ``queries.secondary_findings()`` reports any pathogenic / likely-pathogenic
-   ClinVar variant the genome carries in these genes; "nothing found" is a defensible,
-   reassuring result.
+1. ``ACMG_SF_GENES`` — the ACMG SF v3.3 medically-actionable "secondary findings"
+   genes. ``queries.secondary_findings()`` reports pathogenic / likely-pathogenic
+   ClinVar variants the genome carries in these genes; "nothing found" is a defensible,
+   reassuring result — which is exactly why the list must be complete and the
+   recessive genes must be zygosity-gated. Both are load-bearing for that reassurance.
 
 2. ``TAG_SNPS`` — well-characterized single-SNP traits (the 23andMe-style wellness
    layer) plus the HLA-B*57:01 screening proxy. Coordinates are GRCh38 and alleles are
@@ -18,22 +19,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# ACMG SF v3.2 (81 genes). A filter over ClinVar P/LP — confirm any hit clinically.
+# ACMG SF v3.3 (84 genes) — Lee K, et al. Genet Med. 2025;27(8):101454.
+# A filter over ClinVar P/LP — confirm any hit clinically. Keep this list exact: a gene missing
+# here is a screen that silently never happens, reported to the user as a reassuring "no findings".
 ACMG_SF_GENES = frozenset({
-    # Hereditary cancer
-    "APC", "BMPR1A", "BRCA1", "BRCA2", "CDH1", "MAX", "MEN1", "MLH1", "MSH2", "MSH6",
-    "MUTYH", "NF2", "PALB2", "PMS2", "PTEN", "RB1", "RET", "SDHAF2", "SDHB", "SDHC",
-    "SDHD", "SMAD4", "STK11", "TMEM127", "TP53", "TSC1", "TSC2", "VHL", "WT1",
-    # Cardiovascular
-    "ACTA2", "ACTC1", "ACVRL1", "APOB", "BAG3", "CASQ2", "COL3A1", "DES", "DSC2",
-    "DSG2", "DSP", "ENG", "FBN1", "FLNC", "GLA", "KCNH2", "KCNQ1", "LDLR", "LMNA",
+    # Cancer risk (28)
+    "APC", "BMPR1A", "BRCA1", "BRCA2", "MAX", "MEN1", "MLH1", "MSH2", "MSH6", "MUTYH",
+    "NF2", "PALB2", "PMS2", "PTEN", "RB1", "RET", "SDHAF2", "SDHB", "SDHC", "SDHD",
+    "SMAD4", "STK11", "TMEM127", "TP53", "TSC1", "TSC2", "VHL", "WT1",
+    # Cardiovascular disease (41)
+    "ACTA2", "ACTC1", "APOB", "BAG3", "CALM1", "CALM2", "CALM3", "CASQ2", "COL3A1",
+    "DES", "DSC2", "DSG2", "DSP", "FBN1", "FLNC", "KCNH2", "KCNQ1", "LDLR", "LMNA",
     "MYBPC3", "MYH11", "MYH7", "MYL2", "MYL3", "PCSK9", "PKP2", "PLN", "PRKAG2",
     "RBM20", "RYR2", "SCN5A", "SMAD3", "TGFBR1", "TGFBR2", "TMEM43", "TNNC1", "TNNI3",
-    "TNNT2", "TPM1", "TTN", "TTR",
-    # Metabolic / other (treatable)
-    "ATP7B", "BTD", "GAA", "HFE", "HNF1A", "OTC", "RPE65", "RYR1", "CACNA1S",
+    "TNNT2", "TPM1", "TRDN", "TTN",
+    # Inborn errors of metabolism (6)
+    "ABCD1", "BTD", "CYP27A1", "GAA", "GLA", "OTC",
+    # Other genetic disease (9)
+    "ACVRL1", "ATP7B", "CACNA1S", "ENG", "HFE", "HNF1A", "RPE65", "RYR1", "TTR",
 })
-ACMG_SF_VERSION = "v3.2"
+ACMG_SF_VERSION = "v3.3"
+
+# ACMG reports these only when TWO P/LP variants are present (biallelic) — a single heterozygous
+# carrier is not a secondary finding. Without this gate, common carrier states (HFE p.C282Y is
+# carried by ~10% of Europeans) surface as actionable "findings", which is a false alarm.
+ACMG_SF_RECESSIVE = frozenset({
+    "MUTYH", "CASQ2", "TRDN", "BTD", "CYP27A1", "GAA", "ATP7B", "HFE", "HNF1A", "RPE65",
+})
 
 
 @dataclass(frozen=True)

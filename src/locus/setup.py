@@ -142,8 +142,8 @@ def _final() -> None:
 def run(*, skip_app: bool = False, assume_yes: bool = False, skip_download: bool = False) -> None:
     console.print(Panel(
         "[bold]Locus — full setup[/]\nDownloads ~9 GB of reference databases and builds your local "
-        "genome store, then registers it with Claude. ~20–40 minutes, one-time. Everything stays on "
-        "your Mac — nothing is uploaded.",
+        "genome store, then registers it with Claude. ~20–40 minutes, one-time. Your genome and your "
+        "genotypes stay on your Mac; lookups send only public IDs (rsIDs, gene names).",
         border_style="cyan"))
     settings.ensure_dirs()
 

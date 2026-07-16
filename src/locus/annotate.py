@@ -53,6 +53,29 @@ def _present_info(vcf: Path) -> set[str]:
     }
 
 
+def _require_join(dest: Path, tag: str, label: str, fix: str) -> int:
+    """Count records that actually received ``tag``, and fail if none did.
+
+    A step that ran without error but matched *nothing* is the failure mode this codebase keeps
+    hitting: the annotation is simply absent, every downstream tool answers with nulls, and the
+    pipeline reports success. Zero is not a plausible result for a real genome against any of
+    these databases — the classic cause is a contig-naming mismatch (``1`` vs ``chr1``), which is
+    exactly what silently produces an empty join. Counting and then discarding the number (which
+    is what this used to do) is the same as not checking at all.
+    """
+    n = int(shell.capture(
+        ["bash", "-o", "pipefail", "-c", f"bcftools view -H {dest} | grep -c {tag} || true"]
+    ).strip() or 0)
+    if n == 0:
+        raise shell.ToolError(
+            f"{label} ran but annotated 0 records — the join matched nothing, so this annotation "
+            f"would be silently absent from the store. The usual cause is a contig-naming mismatch "
+            f"(e.g. '1' vs 'chr1') between your genome and the database. {fix}"
+        )
+    console.print(f"  {label}-annotated records: {n:,}")
+    return n
+
+
 def annotate_clinvar(src: Path, dest: Path) -> Path:
     clinvar = settings.annotations_dir / download.CLINVAR_CHR_VCF
     if not clinvar.exists():
@@ -70,9 +93,8 @@ def annotate_clinvar(src: Path, dest: Path) -> Path:
         str(src), "-Oz", "-o", str(dest),
     ])
     _index(dest)
-    # Validate the join actually matched something (0 ⇒ contig mismatch — see notes).
-    n = shell.capture(["bash", "-o", "pipefail", "-c", f"bcftools view -H {dest} | grep -c CLNSIG || true"]).strip()
-    console.print(f"  ClinVar-annotated records: {n}")
+    _require_join(dest, "CLNSIG", "ClinVar",
+                  "Check `locus doctor` shows your genome as GRCh38 and re-run `locus ingest`.")
     return dest
 
 
@@ -315,8 +337,8 @@ def annotate_alphamissense(src: Path, dest: Path) -> Path:
         str(src), "-Oz", "-o", str(dest),
     ])
     _index(dest)
-    n = shell.capture(["bash", "-c", f"bcftools view -H {dest} 2>/dev/null | grep -c am_pathogenicity || true"]).strip()
-    console.print(f"  AlphaMissense-annotated records: {n}")
+    _require_join(dest, "am_pathogenicity", "AlphaMissense",
+                  "Re-download with `locus download alphamissense` and check the genome is GRCh38.")
     return dest
 
 
@@ -398,8 +420,42 @@ def annotate_pharmcat() -> Path | None:
     return report
 
 
-def run(steps: str = "all") -> Path:
-    """Run the requested annotation steps, producing the annotated sites VCF."""
+# The INFO tag each step leaves behind. Used to ask a VCF what it actually carries.
+_STEP_INFO_TAG = {
+    "clinvar": "CLNSIG",
+    "snpeff": "ANN",
+    "alphamissense": "am_class",
+    "gnomad": "gnomAD_AF",
+}
+
+
+def applied_steps(vcf: Path | None = None) -> set[str]:
+    """Which annotation steps the annotated VCF on disk actually carries.
+
+    Read from the VCF's own INFO headers rather than a sidecar, so it cannot drift from reality
+    and it works for stores built before this check existed. The store otherwise cannot tell you:
+    a VCF from a fully-skipped run and one from a healthy run are indistinguishable by name, size
+    or mtime — which is precisely why the missing SnpEff annotation went unnoticed for weeks.
+    ``load`` copies this into ``meta``.
+    """
+    p = vcf or artifacts.annotated_vcf()
+    if not p.exists():
+        return set()
+    try:
+        have = _present_info(p)
+    except Exception:  # noqa: BLE001 - never let a diagnostic break the pipeline
+        return set()
+    return {step for step, tag in _STEP_INFO_TAG.items() if tag in have}
+
+
+def run(steps: str = "all", *, force: bool = False) -> Path:
+    """Run the requested annotation steps, producing the annotated sites VCF.
+
+    ``force`` allows overwriting the store with FEWER annotations than it already has. Off by
+    default: annotate always rebuilds from the sites VCF, so any step that is skipped (or not
+    requested) is dropped from the result — which is how gnomAD AF and SnpEff consequences each
+    silently vanished from a working store.
+    """
     src = artifacts.sites_vcf()
     if not src.exists():
         raise FileNotFoundError(f"No sites VCF ({src}). Run `locus ingest` first.")
@@ -414,26 +470,50 @@ def run(steps: str = "all") -> Path:
 
     work = settings.work_dir
     cur = src
+    applied: set[str] = set()
+
+    def _step(name: str, fn, out: str) -> None:
+        nonlocal cur
+        got = fn(cur, work / f"{settings.sample_id}.{out}.vcf.gz")
+        if got != cur:          # a step that self-skipped returns its input unchanged
+            applied.add(name)
+            cur = got
+
     if "clinvar" in requested:
-        cur = annotate_clinvar(cur, work / f"{settings.sample_id}.clinvar.vcf.gz")
+        _step("clinvar", annotate_clinvar, "clinvar")
     if "snpeff" in requested or "vep" in requested:
-        cur = annotate_snpeff(cur, work / f"{settings.sample_id}.snpeff.vcf.gz")
+        _step("snpeff", annotate_snpeff, "snpeff")
     if "alphamissense" in requested:
-        cur = annotate_alphamissense(cur, work / f"{settings.sample_id}.am.vcf.gz")
-    # gnomAD LAST: it scopes its (expensive, streamed) AF lookups to the positions the steps above
-    # marked interesting — ClinVar-annotated, AlphaMissense-scored, or coding. Running it earlier
-    # would leave it nothing to scope by and force a ~5.1M-position fetch.
+        _step("alphamissense", annotate_alphamissense, "am")
+    # gnomAD LAST: it scopes its AF lookups to the positions the steps above marked interesting —
+    # ClinVar-annotated or AlphaMissense-pathogenic. Running it earlier leaves nothing to scope by.
     if "gnomad" in requested:
-        cur = annotate_gnomad(cur, work / f"{settings.sample_id}.gnomad.vcf.gz")
+        _step("gnomad", annotate_gnomad, "gnomad")
 
     # Finalize the small-variant annotated VCF.
     dest = artifacts.annotated_vcf()
     if cur != src:
+        lost = applied_steps(dest) - applied
+        if lost and not force:
+            raise shell.ToolError(
+                f"Refusing to overwrite the annotated VCF. It currently carries "
+                f"{', '.join(sorted(applied_steps(dest)))}, but this run only produced "
+                f"{', '.join(sorted(applied))} — writing it would silently DROP "
+                f"{', '.join(sorted(lost))} from the store, and every tool built on them would go "
+                f"quiet without any error. Re-run with `--steps all`, or pass `--force` to shrink "
+                f"the store on purpose."
+            )
         shell.run(["bcftools", "view", str(cur), "-Oz", "-o", str(dest)])
         _index(dest)
-        console.print(f"[green]Annotated VCF ready[/] → {dest}")
+        console.print(f"[green]Annotated VCF ready[/] → {dest}  [dim](steps: "
+                      f"{', '.join(sorted(applied))})[/]")
     else:
-        console.print("[yellow]No small-variant annotations applied (no DBs present).[/]")
+        have = applied_steps(dest)
+        console.print("[yellow]No small-variant annotations applied by this run (no DBs present, "
+                      "or every step skipped).[/]")
+        if have:
+            console.print(f"[dim]  The existing annotated VCF is untouched and still carries: "
+                          f"{', '.join(sorted(have))}[/]")
 
     if "pharmcat" in requested:
         annotate_pharmcat()

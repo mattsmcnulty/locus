@@ -61,6 +61,15 @@ def _synthetic_clinvar(base: Path) -> None:
     subprocess.run(["bcftools", "index", "-f", "-t", str(ann / "clinvar.chr.vcf.gz")], check=True)
 
 
+def ingest_and_clinvar(base: Path) -> None:
+    """Ingest the fixture and stage a synthetic ClinVar so annotate has something to join."""
+    from locus import ingest
+    from locus.config import settings
+
+    ingest.run(settings.genome_dir, normalize=True)
+    _synthetic_clinvar(base)
+
+
 def test_ingest_load_query(genome, monkeypatch):
     from locus import annotate, ingest, load, queries
     from locus.config import settings
@@ -531,6 +540,105 @@ def test_pubmed_findings_dedup(genome, monkeypatch):
     check2 = {"since": "2026-01-01", "first_run": True}
     assert refresh._pubmed_findings(check2) == []  # baseline: emit nothing…
     assert check2["new_pmids"] == ["NEW1"]         # …but still record the unseen PMID
+
+
+def test_annotate_refuses_to_shrink_the_store(genome, monkeypatch):
+    """annotate always rebuilds from the sites VCF, so a step that is skipped (or simply not
+    requested) is DROPPED from the result. That is how gnomAD AF and SnpEff consequences each
+    silently vanished from a working store. Re-running a subset must refuse, not quietly shrink."""
+    from locus import annotate
+
+    ingest_and_clinvar(genome)
+    annotate.run(steps="clinvar")
+    # applied_steps reads the VCF's own INFO headers — it cannot drift from what's really there.
+    assert annotate.applied_steps() == {"clinvar"}
+
+    # Pretend the store also carries snpeff+gnomad; re-running clinvar-only would drop them.
+    monkeypatch.setattr(annotate, "applied_steps",
+                        lambda vcf=None: {"clinvar", "snpeff", "gnomad"})
+    with pytest.raises(Exception) as e:
+        annotate.run(steps="clinvar")
+    msg = str(e.value)
+    assert "gnomad" in msg and "snpeff" in msg, "the error must name what would be lost"
+    assert "--force" in msg, "and how to override it deliberately"
+
+    # --force is the explicit escape hatch.
+    annotate.run(steps="clinvar", force=True)
+
+
+def test_annotate_hard_fails_on_zero_join(genome):
+    """A step that runs without error but matches NOTHING is the failure this codebase keeps
+    hitting: the annotation is absent, every tool answers null, and the pipeline reports success.
+    The count was already being computed and thrown away; now it must raise."""
+    from locus import annotate, artifacts, ingest, shell
+    from locus.config import settings
+
+    ingest.run(settings.genome_dir, normalize=True)
+    sites = artifacts.sites_vcf()
+
+    # A tag no record carries is exactly what a contig mismatch produces: the command exits 0,
+    # writes a valid VCF, and joins nothing.
+    with pytest.raises(shell.ToolError) as e:
+        annotate._require_join(sites, "NO_SUCH_TAG", "ClinVar", "fix hint here")
+    assert "annotated 0 records" in str(e.value)
+    assert "contig" in str(e.value).lower(), "the error must name the usual cause"
+    assert "fix hint here" in str(e.value)
+
+    # A tag that IS present returns the count instead of raising.
+    assert annotate._require_join(sites, "chr21", "Test", "") == 4
+
+
+def test_download_all_raises_on_failure(monkeypatch):
+    """`download all` kept going after a failure AND returned normally, so setup marched on and
+    printed 'Locus is ready' over a half-built genome. Resilient must not mean silent."""
+    from locus import download, shell
+
+    monkeypatch.setattr(download, "TARGETS", {
+        "good": lambda: None,
+        "bad": lambda: (_ for _ in ()).throw(RuntimeError("network down")),
+    })
+    monkeypatch.setattr(download, "guidance_large", lambda: None)
+    with pytest.raises(shell.ToolError) as e:
+        download.run("all")
+    assert "bad" in str(e.value)          # names what failed
+    assert "1 of 2 downloads failed" in str(e.value)
+
+
+def test_reanalyze_clinvar_aborts_on_annotation_collapse(monkeypatch):
+    """If a re-annotate loses ClinVar, `cur` is empty and diffing would emit a fabricated
+    'pathogenic record withdrawn — re-check' for every P/LP variant carried."""
+    from locus import refresh, shell
+
+    prev = {("chr1", i, "A", "G"): {"clnsig": "Pathogenic", "clnrevstat": "", "gene": "G",
+                                    "rsid": "rs1", "clndn": "d"} for i in range(100)}
+    snaps = iter([prev, {}])   # before: 100 annotated; after: collapsed to 0
+    monkeypatch.setattr(refresh, "_snapshot_clinvar", lambda: next(snaps))
+    monkeypatch.setattr(refresh.download, "download_clinvar", lambda: None)
+    monkeypatch.setattr(refresh.annotate, "run", lambda **k: None)
+    monkeypatch.setattr(refresh.load, "run", lambda: None)
+    with pytest.raises(shell.ToolError) as e:
+        refresh._reanalyze_clinvar()
+    assert "collapsed" in str(e.value)
+
+    # Sanity: the pure differ WOULD have produced the fiction we're preventing.
+    assert len(refresh.classify_clinvar_delta(prev, {})) == 100
+
+
+def test_study_variants_distinguishes_failure_from_zero(monkeypatch):
+    """'We couldn't look it up' and 'you carry none' are opposite answers."""
+    from locus import gwas, literature
+
+    monkeypatch.setattr(literature, "study_rsids", lambda pmid: ["rs1", "rs2"])
+    monkeypatch.setattr(gwas, "ask_markers", lambda rsids: [])   # Ensembl down
+    res = literature.study_variants("123")
+    assert res["carried"] == 0
+    assert "NOT" in res["note"] and "unknown" in res["note"].lower()
+
+    monkeypatch.setattr(gwas, "ask_markers",
+                        lambda rsids: [{"rsid": "rs1", "genotype": "A/G", "ref": "A"}])
+    res = literature.study_variants("123")
+    assert res["carried"] == 1
+    assert "could not be resolved" in res["note"]   # 1 of 2 unresolved is surfaced, not hidden
 
 
 def test_acmg_panel_matches_v33():

@@ -17,6 +17,7 @@ import pyarrow as pa
 from cyvcf2 import VCF
 from rich.console import Console
 
+from . import annotate as _annotate
 from . import artifacts
 from .config import settings
 from .db import SCHEMA_VERSION
@@ -127,6 +128,18 @@ def _fmt_gt(v) -> str | None:
         return f"{'.' if a < 0 else a}{sep}{'.' if b < 0 else b}"
     except (IndexError, TypeError):
         return None
+
+
+# Tables from features that were removed. They survive in stores built by older versions because
+# load.run() only drops the variant-derived tables, and an orphan is worse than clutter here:
+# run_sql exposes it to Claude, who can read an empty `ancestry_segments` as "local ancestry ran
+# and found no segments" rather than "this feature does not exist".
+_ORPHAN_TABLES = ("ancestry_segments",)   # Gnomix chromosome painting — prototyped, then removed.
+
+
+def _drop_orphans(con: duckdb.DuckDBPyConnection) -> None:
+    for t in _ORPHAN_TABLES:
+        con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
 def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
@@ -470,6 +483,7 @@ def run() -> Path:
         # Rebuild only the variant-derived tables; preserve ancestry/PGS (written by `locus ancestry`).
         for t in ("variants", "cnv", "sv", "pgx_genes", "pgx_drugs", "meta"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
+        _drop_orphans(con)
         _create_schema(con)
         total = 0
         for tbl in _variant_batches(src):
@@ -495,6 +509,9 @@ def run() -> Path:
         con.execute("DELETE FROM meta")
         con.executemany("INSERT INTO meta VALUES (?, ?)", [
             ("schema_version", str(SCHEMA_VERSION)),
+            # Which annotations this store actually carries — a degraded build is otherwise
+            # indistinguishable from a healthy one (same filename, similar size).
+            ("annotate_steps", ",".join(sorted(_annotate.applied_steps())) or "none"),
             ("sample_id", settings.sample_id),
             ("source_vcf", src.name),
             ("created_at", _dt.datetime.now().isoformat(timespec="seconds")),

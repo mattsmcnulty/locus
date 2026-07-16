@@ -291,13 +291,26 @@ TARGETS = {
 
 def run(target: str) -> None:
     if target == "all":
-        # Resilient: a failure in one step shouldn't abort the others.
+        # Keep going after a failure so one bad download doesn't cost you the other 8 GB — but
+        # RAISE at the end. Previously this only printed red and returned normally, so `setup`
+        # marched on: the annotate steps then self-skipped on the missing DB and setup finished
+        # by printing "Locus is ready" over a half-built genome, ~40 minutes after the one red
+        # line had scrolled off screen. Resilient must not mean silent.
+        failed: list[str] = []
         for name, fn in TARGETS.items():
             try:
                 fn()
-            except Exception as e:  # noqa: BLE001 - report and continue
-                console.print(f"[red]'{name}' failed:[/] {e}\n[dim]Re-run later with `locus download {name}`.[/]")
+            except Exception as e:  # noqa: BLE001 - collect and report together
+                failed.append(name)
+                console.print(f"[red]'{name}' failed:[/] {e}")
         guidance_large()
+        if failed:
+            raise shell.ToolError(
+                f"{len(failed)} of {len(TARGETS)} downloads failed: {', '.join(failed)}. "
+                f"The features built on them would be silently missing, so this is a hard stop. "
+                f"Re-run `locus download all` (finished targets are skipped) or "
+                f"`locus download <target>` individually — nothing already downloaded is lost."
+            )
         return
     fn = TARGETS.get(target)
     if not fn:

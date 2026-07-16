@@ -238,13 +238,15 @@ def download(
 
 @app.command()
 def annotate(
-    steps: str = typer.Option("all", help="Comma list: clinvar,gnomad,snpeff,pharmcat or 'all'."),
+    steps: str = typer.Option("all", help="Comma list: clinvar,snpeff,alphamissense,gnomad,pharmcat or 'all'."),
+    force: bool = typer.Option(False, "--force",
+                               help="Allow overwriting the store with FEWER annotations than it already has."),
 ) -> None:
     """Annotate variants against open-source databases."""
     from . import annotate as _annotate
 
     settings.ensure_dirs()
-    _annotate.run(steps=steps)
+    _annotate.run(steps=steps, force=force)
 
 
 @app.command()

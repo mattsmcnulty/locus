@@ -228,10 +228,21 @@ def study_variants(pmid: str) -> dict:
         return {"pmid": pmid, "total": 0, "carried": 0, "markers": [],
                 "note": "No GWAS Catalog study/variants found for that PubMed ID."}
     markers = gwas.ask_markers(rsids)
+    if not markers:
+        # The rsIDs came from the GWAS Catalog, so a genotyping failure (Ensembl down, bcftools
+        # error) yields an empty list while `len(rsids)` stays large — which would otherwise be
+        # reported as a confident "you carry 0 of them". "We couldn't look it up" and "you carry
+        # none" are opposite answers; never let the first masquerade as the second.
+        return {"pmid": pmid, "total": len(rsids), "carried": 0, "markers": [],
+                "note": (f"This study reported {len(rsids)} variant(s), but genotyping them failed "
+                         f"(the Ensembl lookup returned nothing). This is NOT a result of 'you carry "
+                         f"none' — it is unknown. Try again shortly.")}
     carried = sum(1 for m in markers if _is_carried(m.get("genotype"), m.get("ref")))
-    note = (f"{len(rsids)} variant(s) reported by this study; you carry a non-reference allele at "
-            f"{carried}. Hom-ref-aware live genotyping (Ensembl GRCh38). Single-variant evidence — "
-            "informational, not diagnostic.")
+    unresolved = len(rsids) - len(markers)
+    note = (f"{len(rsids)} variant(s) reported by this study; genotyped {len(markers)}; you carry a "
+            f"non-reference allele at {carried}. Hom-ref-aware live genotyping (Ensembl GRCh38). "
+            + (f"{unresolved} could not be resolved and are unknown, not absent. " if unresolved else "")
+            + "Single-variant evidence — informational, not diagnostic.")
     return {"pmid": pmid, "total": len(rsids), "carried": carried, "markers": markers, "note": note}
 
 

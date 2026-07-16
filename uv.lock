@@ -490,7 +490,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mcp", specifier = ">=1.2" },
+    { name = "mcp", specifier = ">=1.27,<2" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "packaging", marker = "extra == 'pgx'", specifier = "~=24.1" },
     { name = "pandas", marker = "extra == 'pgx'", specifier = ">=2.1.3" },

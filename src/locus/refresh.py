@@ -25,7 +25,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import annotate, download, load, manifest
+from . import annotate, download, load, manifest, shell
 from .config import settings
 from .db import connect
 
@@ -293,6 +293,17 @@ def _reanalyze_clinvar() -> list[Finding]:
     load.run()
 
     cur = _snapshot_clinvar()
+    # A collapse means the re-annotate lost ClinVar (a skipped step, a renamed INFO field, a
+    # contig mismatch) — NOT that ClinVar withdrew your variants. Diffing anyway would emit a
+    # "pathogenic record withdrawn — re-check" finding for every P/LP variant you carry: a
+    # fabricated scare, at moderate tier, in the changelog. Refuse rather than report fiction.
+    if prev and len(cur) < len(prev) * 0.5:
+        raise shell.ToolError(
+            f"ClinVar reanalysis aborted: annotated positions collapsed {len(prev):,} → {len(cur):,}. "
+            f"That is a broken re-annotate, not a real ClinVar change — reporting it would flag "
+            f"every pathogenic variant you carry as 'withdrawn'. The store is unchanged; check "
+            f"`locus doctor` and re-run `locus annotate --steps all`."
+        )
     findings = classify_clinvar_delta(prev, cur)
     console.print(f"ClinVar reanalysis: {len(findings)} change(s) at carried positions "
                   f"(prev {len(prev):,} → now {len(cur):,} annotated).")

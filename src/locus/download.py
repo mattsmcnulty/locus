@@ -224,6 +224,23 @@ def setup_gwas() -> Path:
     return tsv
 
 
+CLINGEN_URL = "https://search.clinicalgenome.org/kb/gene-validity/download"
+
+
+def setup_clingen() -> Path:
+    """Download the ClinGen Gene-Disease Validity summary CSV (~1 MB, no API key)."""
+    d = settings.annotations_dir / "clingen"
+    csv_path = d / "gene-disease-summary.csv"
+    if csv_path.exists():
+        console.print(f"[green]ClinGen present[/] → {csv_path}")
+        return csv_path
+    d.mkdir(parents=True, exist_ok=True)
+    console.print("[bold]Downloading ClinGen gene-disease validity (~1 MB)…[/]")
+    _curl(CLINGEN_URL, csv_path)
+    console.print(f"[green]ClinGen ready[/] → {csv_path}")
+    return csv_path
+
+
 def setup_ancestry() -> None:
     """PLINK2 (native arm64) + the 1000 Genomes GRCh38 reference panel for ancestry/PRS."""
     tools = settings.data_dir / "tools"
@@ -286,6 +303,7 @@ TARGETS = {
     "alphamissense": setup_alphamissense,
     "haplogrep": setup_haplogrep,
     "gwas": setup_gwas,
+    "clingen": setup_clingen,
 }
 
 

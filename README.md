@@ -51,6 +51,7 @@ need the BAM/CRAM and are not yet implemented.)
 | **On-demand** | Paste a new paper's rsIDs and get your genotypes live (`ask_about`) |
 | **Population frequency** | **gnomAD** allele frequencies (via Ensembl) on the variants where rarity matters — those ClinVar has classified or AlphaMissense calls pathogenic |
 | **Literature** | New papers about the **specific variants you carry** (NCBI **LitVar2**, keyed on your clinically-notable rsIDs) and new **PubMed** papers on your notable genes + new **GWAS** associations at your variants, all surfaced into the changelog; ask for the latest research (`literature_for`) or "which variants did this study find that I have?" (`variants_in_study`) |
+| **Gene-disease validity** | Whether a **gene** you carry a variant in is established as disease-causing (**ClinGen**, Definitive→Refuted) — and the watcher flags when that *changes* even with no variant reclassification (`gene_disease_validity`) |
 | **Living updates** | `locus refresh` re-interprets your genome as databases move — **ClinVar reanalysis** (variants you carry newly classified pathogenic), plus new GWAS associations and PubMed papers on your genes |
 
 ## Architecture
@@ -137,8 +138,9 @@ Run any command with `uv run locus <command>` (or activate the venv / add an ali
 | `locus traits` | Genotype single-SNP traits/wellness + HLA-B\*57:01 proxy + mtDNA haplogroup |
 | `locus gwas` | Genotype GWAS Catalog risk alleles (p<5e-8) and store the ones you carry |
 | `locus report` | Write a self-contained HTML summary of your genome (offline, no scripts, shareable) |
+| `locus gene-disease <GENE>` | ClinGen's curated gene-disease validity for a gene (Definitive → Refuted) |
 | `locus literature <gene\|rsID\|PMID>` | Recent PubMed papers on a gene/rsID, or (for a PubMed ID) which variants that study reported that you carry |
-| `locus refresh [--dry-run] [--force] [--sources clinvar,pgs,cpic,gwas,pubmed,litvar]` | Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis, new PGS, CPIC updates, new GWAS associations at your variants, new LitVar/PubMed papers on your variants & genes) |
+| `locus refresh [--dry-run] [--force] [--sources clinvar,pgs,cpic,gwas,pubmed,litvar,clingen]` | Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis, new PGS, CPIC updates, new GWAS associations at your variants, new LitVar/PubMed papers on your variants & genes) |
 | `locus schedule install [--weekday N] [--hour H]` | Install a weekly macOS launchd job that runs `locus refresh` |
 | `locus schedule status` / `locus schedule uninstall` | Show / remove the scheduled job |
 | `locus serve mcp` | Start the MCP server (stdio) — what Claude connects to |
@@ -181,7 +183,7 @@ clients dispatch them reliably):
 **Ancestry & risk** — `ancestry`, `polygenic_risk`
 **Traits & breadth** — `traits`, `gwas_associations`, `ask_about` (paste rsIDs or a trait)
 **Literature** — `literature_for` (recent PubMed on a gene/rsID/topic), `variants_in_study` (which of a paper's variants you carry)
-**Interpretation** — `variant_dossier` (one call: ClinVar + AlphaMissense + gnomAD + GWAS + literature, weighed together)
+**Interpretation** — `variant_dossier` (one call: ClinVar + AlphaMissense + gnomAD + GWAS + ClinGen + literature, weighed together), `gene_disease_validity` (ClinGen curation for a gene)
 **Living updates** — `whats_new` (the ranked changelog from `locus refresh`)
 
 **Guided workflows** (MCP prompts, pick them from Claude's prompt menu): *Annual genome review*, *Before starting a new medication*, *Family planning / carrier check*, *Explain a variant* — each one tells Claude which tools to combine and which caveats not to drop.
@@ -238,6 +240,7 @@ tool, the SPA **Changelog** tab, and `data/reports/whats_new.md`).
 - **GWAS Catalog** — when a new catalog release lands, re-scans the variants you carry and flags
   newly-published genome-wide-significant associations (weak single hits, not a calibrated score).
   Fully local — nothing variant-specific leaves the machine.
+- **ClinGen gene-disease validity** — flags when a *gene* you carry a notable (pathogenic, uncertain, or predicted-damaging) variant in is newly established as disease-causing, or has an existing link strengthened or refuted — the case no variant-level watcher catches because nothing about your variant changed.
 - **PGS Catalog** — reports newly published scores (suggest-only; you add relevant IDs to track).
 - **CPIC** — flags pharmacogenomic guideline updates touching genes you carry.
 

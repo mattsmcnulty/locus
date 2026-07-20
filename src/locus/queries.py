@@ -635,6 +635,8 @@ class VariantDossier(BaseModel):
     gnomad_af_grpmax: float | None = None
     acmg_sf_gene: bool = Field(default=False,
                                description="Gene is on the ACMG SF v3.3 medically-actionable list")
+    gene_disease: str | None = Field(default=None,
+                                     description="ClinGen's strongest gene-disease validity for this gene, if curated")
     carrier_condition: str | None = Field(default=None,
                                           description="Recessive condition, if the gene is on the carrier panel")
     gwas_associations: list[Association] = Field(default_factory=list)
@@ -662,6 +664,7 @@ def variant_dossier(rsid: str) -> VariantDossier:
     people carry it. Assembling that picture from separate tools invites a confident wrong answer,
     so the dossier puts the contradicting fields side by side and states the precedence.
     """
+    from . import clingen
     from .panels import ACMG_SF_GENES, CARRIER_PANEL
 
     rsid = rsid.strip()
@@ -685,6 +688,8 @@ def variant_dossier(rsid: str) -> VariantDossier:
     carried = [a for a in assoc.hits if a.rsid == rsid]
     tr = next((t for t in traits().traits if t.rsid == rsid), None)
     cond = next((c.condition for c in CARRIER_PANEL if gene and c.gene == gene), None)
+    gd = next(iter(clingen.for_gene(gene)), None) if gene else None
+    gene_disease = f"{gd.classification}: {gd.disease} ({gd.moi})" if gd else None
 
     note = (
         "Weigh these together — they routinely disagree, and the order matters. ClinVar is a "
@@ -704,7 +709,8 @@ def variant_dossier(rsid: str) -> VariantDossier:
         alphamissense=v.am_class, alphamissense_score=v.am_pathogenicity,
         gnomad_af=v.gnomad_af, gnomad_af_grpmax=v.gnomad_af_grpmax,
         acmg_sf_gene=bool(gene and gene in ACMG_SF_GENES), carrier_condition=cond,
-        gwas_associations=carried, trait=tr, literature_url=litvar, note=note,
+        gene_disease=gene_disease, gwas_associations=carried, trait=tr,
+        literature_url=litvar, note=note,
     )
 
 

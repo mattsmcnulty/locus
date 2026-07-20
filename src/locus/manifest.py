@@ -34,6 +34,7 @@ LICENSES = {
     "litvar": "public-domain (NCBI LitVar2 metadata)",
     "alphamissense": "CC-BY-NC 4.0",
     "gnomad": "open (gnomAD)",
+    "clingen": "CC0 (ClinGen)",
 }
 
 

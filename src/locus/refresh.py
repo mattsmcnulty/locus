@@ -543,8 +543,121 @@ def _litvar_findings(check: dict) -> list[Finding]:
     return findings
 
 
+# ── ClinGen gene-disease validity watcher (the gene itself becoming disease-relevant) ─
+_CARRIED_LABEL = {"plp": "a pathogenic/likely-pathogenic", "vus": "an uncertain-significance",
+                  "predicted": "a predicted-damaging"}
+
+
+def _clingen_watch_genes() -> dict[str, str]:
+    """Genes where the genome carries a NON-BENIGN variant, mapped to what it carries
+    (plp > vus > predicted). This is the only scope where a gene-disease change is meaningful:
+    a gene gaining a definitive disease link matters if you carry an uncertain variant in it, and
+    is pure noise if you carry only a benign one (which is true of most of your ~30k genes)."""
+    status: dict[str, str] = {}
+    with connect(read_only=True) as con:
+        def q(sql: str) -> list[str]:
+            try:
+                return [g for (g,) in con.execute(sql).fetchall() if g]
+            except Exception:  # noqa: BLE001
+                return []
+        # Assign weakest → strongest so the strongest evidence wins the label.
+        for g in q("SELECT DISTINCT gene FROM variants WHERE am_class LIKE '%pathogenic%'"):
+            status[g.upper()] = "predicted"
+        for g in q("SELECT DISTINCT gene FROM variants WHERE lower(clnsig) LIKE '%uncertain%' "
+                   "OR lower(clnsig) LIKE '%conflicting%'"):
+            status[g.upper()] = "vus"
+        for g in q("SELECT DISTINCT gene FROM variants WHERE lower(clnsig) LIKE '%pathogenic%' "
+                   "AND lower(clnsig) NOT LIKE '%benign%' AND lower(clnsig) NOT LIKE '%conflicting%'"):
+            status[g.upper()] = "plp"
+    return status
+
+
+def _snapshot_clingen(path: Path, genes: set[str]) -> dict:
+    """ClinGen assertions for the watched genes, keyed by (gene, MONDO id)."""
+    from . import clingen
+
+    return {a.key: a for a in clingen.parse(path) if a.gene.upper() in genes}
+
+
+def classify_clingen_delta(prev: dict, cur: dict, status: dict[str, str]) -> list[Finding]:
+    """New or changed gene-disease validity for genes you carry a notable variant in. Pure — no I/O.
+
+    Surfaces: a gene newly *established* as disease-causing (Definitive/Strong/Moderate), an
+    existing link *strengthened*, or one *refuted/disputed*. Tiered by how notable your variant in
+    that gene is (P/LP or VUS → moderate; predicted-only → weak). It deliberately ignores Limited
+    and unchanged assertions — the signal is the gene's disease status *changing*.
+    """
+    from . import clingen
+
+    findings: list[Finding] = []
+    for key, a in cur.items():
+        st = status.get(a.gene.upper())
+        if st is None:
+            continue
+        carried = _CARRIED_LABEL.get(st, "a")
+        tier = "moderate" if st in ("plp", "vus") else "weak"
+        p = prev.get(key)
+        if p is None and a.classification in clingen.ESTABLISHED:
+            findings.append(Finding(
+                source="clingen", kind="new_gene_disease", tier=tier, gene=a.gene,
+                title=f"{a.gene} newly linked to {a.disease} (ClinGen: {a.classification})",
+                detail=(f"ClinGen established {a.gene}–{a.disease} ({a.moi}, {a.classification}). "
+                        f"You carry {carried} variant in {a.gene} — worth re-evaluating it in light "
+                        f"of this."),
+                new_value=a.classification, release=(a.date or "")[:10], url=a.url))
+        elif p is not None and p.classification != a.classification:
+            if a.classification in clingen.ESTABLISHED and a.rank > p.rank:
+                findings.append(Finding(
+                    source="clingen", kind="validity_strengthened", tier=tier, gene=a.gene,
+                    title=f"{a.gene}–{a.disease} strengthened to {a.classification} (ClinGen)",
+                    detail=(f"Gene-disease validity rose {p.classification} → {a.classification}. "
+                            f"You carry {carried} variant in {a.gene}."),
+                    old_value=p.classification, new_value=a.classification,
+                    release=(a.date or "")[:10], url=a.url))
+            elif a.classification in clingen.REFUTING and a.rank < p.rank:
+                findings.append(Finding(
+                    source="clingen", kind="validity_refuted", tier=tier, gene=a.gene,
+                    title=f"{a.gene}–{a.disease} downgraded to {a.classification} (ClinGen)",
+                    detail=(f"A prior gene-disease link is now {a.classification} "
+                            f"({p.classification} → {a.classification}) — relevant because you carry "
+                            f"{carried} variant in {a.gene}."),
+                    old_value=p.classification, new_value=a.classification,
+                    release=(a.date or "")[:10], url=a.url))
+    return findings
+
+
+def check_clingen(man: dict) -> dict | None:
+    """Probe ClinGen's Last-Modified/ETag. Returns {version, url, changed} or None on failure."""
+    stamp = _http_stamp(download.CLINGEN_URL)
+    if not stamp:
+        return None
+    prev = manifest.get(man, "clingen")
+    return {"version": stamp, "url": download.CLINGEN_URL, "changed": stamp != prev.get("version")}
+
+
+def _reanalyze_clingen() -> list[Finding]:
+    """Snapshot current gene-disease validity for your notable genes → re-download → diff."""
+    genes = _clingen_watch_genes()
+    if not genes:
+        console.print("ClinGen: no genes with a notable variant to watch — skipping.")
+        return []
+    csv_path = settings.annotations_dir / "clingen" / "gene-disease-summary.csv"
+    prev = _snapshot_clingen(csv_path, set(genes)) if csv_path.exists() else None
+    csv_path.unlink(missing_ok=True)   # force a fresh download
+    download.setup_clingen()
+    cur = _snapshot_clingen(csv_path, set(genes))
+    if prev is None:
+        console.print(f"ClinGen baseline recorded ({len(cur):,} assertions on {len(genes):,} "
+                      f"notable genes).")
+        return []
+    findings = classify_clingen_delta(prev, cur, genes)
+    console.print(f"ClinGen: {len(findings)} gene-disease change(s) on genes you carry a notable "
+                  f"variant in (prev {len(prev):,} → now {len(cur):,} assertions).")
+    return findings
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────────────────
-ALL_SOURCES = ["clinvar", "pgs", "cpic", "gwas", "pubmed", "litvar"]
+ALL_SOURCES = ["clinvar", "pgs", "cpic", "gwas", "pubmed", "litvar", "clingen"]
 
 
 def _write_report(findings: list[Finding], ts: str) -> Path | None:
@@ -569,7 +682,7 @@ def _write_report(findings: list[Finding], ts: str) -> Path | None:
 def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> list[Finding]:
     """Check each source, re-interpret what changed, and persist ranked findings.
 
-    sources: comma-separated subset of {clinvar, pgs, cpic, gwas, pubmed, litvar} or "all".
+    sources: subset of {clinvar, pgs, cpic, gwas, pubmed, litvar, clingen} or "all".
     dry_run: probe + report what *would* change; write nothing.
     force:   run the per-source work even if the version looks unchanged.
     """
@@ -666,6 +779,23 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
             tag = " (baseline seeded)" if chk.get("first_run") and litvar_new_ids else ""
             console.print(f"LitVar: {len(lf)} new variant-paper finding(s){tag}")
         source_updates.append(("litvar", chk["version"], chk["url"], "", True))
+
+    if "clingen" in requested:
+        chk = check_clingen(man)
+        if chk is None:
+            console.print("[yellow]ClinGen: probe failed — skipping.[/]")
+        else:
+            changed = chk["changed"] or force
+            state = "NEW" if chk["changed"] else ("unchanged, forced" if force else "unchanged")
+            console.print(f"ClinGen: {str(chk['version'])[:32]} ({state})")
+            if changed and not dry_run:
+                findings += _reanalyze_clingen()
+            elif changed and dry_run:
+                findings.append(Finding(
+                    source="clingen", kind="update_available", tier="info",
+                    title="ClinGen update available — run `locus refresh` to re-scan gene-disease validity",
+                    new_value=str(chk["version"])[:32]))
+            source_updates.append(("clingen", chk["version"], chk["url"], "", chk["changed"]))
 
     # Rank strongest-first for the printed digest.
     findings.sort(key=lambda f: TIER_ORDER.index(f.tier) if f.tier in TIER_ORDER else len(TIER_ORDER))

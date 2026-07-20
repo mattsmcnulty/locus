@@ -140,6 +140,7 @@ def doctor() -> None:
             (ann / "ancestry" / "all_hg38.pgen").exists() and (settings.data_dir / "tools" / "plink2").exists(),
             "locus download ancestry")
     _db_row("GWAS Catalog", (ann / "gwas" / "gwas-catalog-associations.tsv").exists(), "locus download gwas")
+    _db_row("ClinGen validity", (ann / "clingen" / "gene-disease-summary.csv").exists(), "locus download clingen")
     _db_row("Haplogrep (mtDNA)", (ann / "haplogrep" / "haplogrep.jar").exists(), "locus download haplogrep",
             needs_java=True)
 
@@ -322,7 +323,7 @@ def pipeline(
 
 @app.command()
 def refresh(
-    sources: str = typer.Option("all", help="Comma list: clinvar,pgs,cpic,gwas,pubmed,litvar or 'all'."),
+    sources: str = typer.Option("all", help="Comma list: clinvar,pgs,cpic,gwas,pubmed,litvar,clingen or 'all'."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Probe + report what would change; write nothing."),
     force: bool = typer.Option(False, "--force", help="Run the per-source work even if versions look unchanged."),
 ) -> None:
@@ -332,6 +333,20 @@ def refresh(
 
     settings.ensure_dirs()
     _refresh.run(sources=sources, dry_run=dry_run, force=force)
+
+
+@app.command(name="gene-disease")
+def gene_disease(gene: str = typer.Argument(..., help="A gene symbol, e.g. BRCA2.")) -> None:
+    """Show ClinGen's curated gene-disease validity for a gene (Definitive → Refuted)."""
+    from . import clingen
+
+    settings.ensure_dirs()
+    hits = clingen.for_gene(gene)
+    if not hits:
+        console.print(f"[yellow]No ClinGen assertion for {gene}[/] (not curated, or run `locus download clingen`).")
+        return
+    for a in hits:
+        console.print(f"  [bold]{a.classification:12}[/] {a.disease}  [dim]({a.moi}, {a.date[:10]})[/]")
 
 
 @app.command()

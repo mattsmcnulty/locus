@@ -317,6 +317,46 @@ def variants_in_study(pmid: str) -> StudyVariantsResult:
                                markers=markers, note=res["note"])
 
 
+class GeneDiseaseAssertion(BaseModel):
+    disease: str
+    mondo: str
+    inheritance: str = Field(description="Mode of inheritance: AD | AR | XL | …")
+    classification: str = Field(description="Definitive > Strong > Moderate > Limited > Disputed > Refuted")
+    date: str
+    panel: str
+    url: str
+
+
+class GeneDiseaseResult(BaseModel):
+    gene: str
+    total: int
+    assertions: list[GeneDiseaseAssertion]
+    note: str
+
+
+@mcp.tool()
+def gene_disease_validity(gene: str) -> GeneDiseaseResult:
+    """Is a GENE itself established as causing disease? Returns ClinGen's expert-curated
+    gene-disease validity classifications for a gene (Definitive → Strong → Moderate → Limited →
+    Disputed → Refuted), strongest first. Use this to judge whether a gene *matters* — distinct
+    from whether a specific variant is pathogenic (that's `clinical_findings`/`variant_dossier`).
+
+    A "Definitive" link means the gene-disease relationship is real; it does NOT mean the person's
+    particular variant is pathogenic. An empty result means ClinGen hasn't curated this gene, not
+    that the gene is benign. Reads a local file — nothing about the genome leaves the machine."""
+    from . import clingen
+
+    hits = clingen.for_gene(gene)
+    assertions = [GeneDiseaseAssertion(disease=a.disease, mondo=a.mondo, inheritance=a.moi,
+                                       classification=a.classification, date=a.date, panel=a.panel,
+                                       url=a.url) for a in hits]
+    note = ("ClinGen gene-disease VALIDITY — whether the gene causes the disease, not whether this "
+            "genome's variant is pathogenic. Confirm any variant-level question separately." if hits
+            else f"ClinGen has no curated gene-disease assertion for {gene}. That is 'not curated', "
+                 "not 'no disease association' — run `locus download clingen` if you haven't.")
+    return GeneDiseaseResult(gene=gene, total=len(assertions), assertions=assertions, note=note)
+
+
 @mcp.tool()
 def variant_dossier(rsid: str) -> queries.VariantDossier:
     """Everything this genome knows about ONE variant, in a single call: genotype/zygosity, gene,

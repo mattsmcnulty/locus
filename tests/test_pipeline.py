@@ -717,6 +717,61 @@ def test_guided_prompts_registered():
     assert "NOT DETERMINED" in nm and "CYP2D6" in nm
 
 
+def test_clingen_parse_and_lookup(tmp_path):
+    """Parse the real ClinGen CSV shape (banner rows, header, +++ separators) and look up a gene."""
+    from locus import clingen
+
+    csv = tmp_path / "cg.csv"
+    csv.write_text(
+        '"CLINGEN GENE DISEASE VALIDITY CURATIONS","",""\n'
+        '"FILE CREATED: 2026-07-20","",""\n'
+        '"+++++++","+++++++","+++++++"\n'
+        '"GENE SYMBOL","GENE ID (HGNC)","DISEASE LABEL","DISEASE ID (MONDO)","MOI","SOP",'
+        '"CLASSIFICATION","ONLINE REPORT","CLASSIFICATION DATE","GCEP"\n'
+        '"+++++++","+++++++","+++++++","+++++++","+++++++","+++++++","+++++++","+++++++","+++++++","+++++++"\n'
+        '"BRCA2","HGNC:1101","BRCA2 cancer","MONDO:1","AD","SOP","Definitive","http://x","2024-08-29","Panel"\n'
+        '"BRCA2","HGNC:1101","Fanconi anemia","MONDO:2","AR","SOP","Definitive","http://y","2019-04-19","Panel"\n'
+        '"FOO","HGNC:9","weak thing","MONDO:9","AD","SOP","Limited","http://z","2020-01-01","Panel"\n'
+    )
+    a = clingen.parse(csv)
+    assert len(a) == 3
+    brca2 = [x for x in a if x.gene == "BRCA2"]
+    assert len(brca2) == 2 and all(x.classification == "Definitive" for x in brca2)
+    assert {x.moi for x in brca2} == {"AD", "AR"}
+    assert brca2[0].mondo.startswith("MONDO:")
+
+
+def test_classify_clingen_delta():
+    """Surfaces a gene NEWLY linked to disease, a link STRENGTHENED, and one REFUTED — for genes
+    the genome carries a notable variant in. Ignores Limited and unchanged. Pure function."""
+    from locus import clingen
+    from locus.refresh import classify_clingen_delta
+
+    def A(gene, mondo, cls):
+        return clingen.Assertion(gene, f"{gene} disease", mondo, "AD", cls, "2026-07-20", "http://u")
+
+    status = {"AAA": "plp", "BBB": "vus", "CCC": "predicted", "DDD": "plp"}
+    prev = {
+        ("AAA", "M1"): A("AAA", "M1", "Definitive"),   # unchanged -> nothing
+        ("DDD", "M4"): A("DDD", "M4", "Definitive"),   # will be refuted
+    }
+    cur = {
+        ("AAA", "M1"): A("AAA", "M1", "Definitive"),          # unchanged
+        ("BBB", "M2"): A("BBB", "M2", "Definitive"),          # NEW, vus gene -> moderate
+        ("CCC", "M3"): A("CCC", "M3", "Definitive"),          # NEW, predicted gene -> weak
+        ("DDD", "M4"): A("DDD", "M4", "Refuted"),             # refuted, plp gene -> moderate
+        ("AAA", "M5"): A("AAA", "M5", "Limited"),             # NEW but Limited -> ignored
+    }
+    out = {(f.kind, f.gene): f for f in classify_clingen_delta(prev, cur, status)}
+    assert out[("new_gene_disease", "BBB")].tier == "moderate"
+    assert out[("new_gene_disease", "CCC")].tier == "weak", "predicted-only genes are weaker signal"
+    assert out[("validity_refuted", "DDD")].tier == "moderate"
+    assert not any(f.gene == "AAA" for f in classify_clingen_delta(prev, cur, status)), \
+        "unchanged and Limited must not surface"
+    # A gene NOT in the watch set is never surfaced, even if it changes.
+    assert classify_clingen_delta({}, {("ZZZ", "M"): A("ZZZ", "M", "Definitive")}, status) == []
+
+
 def test_carrier_status_zygosity_and_honesty(genome):
     """Carrier = one copy (silent for you, matters for your children). Two copies = possibly
     affected. And the report must ALWAYS name what it cannot assess: SMN1/FMR1 are among the most

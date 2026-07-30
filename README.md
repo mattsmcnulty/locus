@@ -234,9 +234,11 @@ tool, the SPA **Changelog** tab, and `data/reports/whats_new.md`).
 - **LitVar2 (variant-level literature)** — the highest-signal source: new papers about the *specific
   variants you carry* (every clinically-notable rsID — pathogenic, VUS/conflicting, risk/drug-response),
   via NCBI's variant→literature index. *"New paper about rs…, which you carry"* beats a gene-level hit.
-- **PubMed (gene-level literature)** — recent papers on your notable genes (ones you carry pathogenic,
-  pharmacogenomic, or AlphaMissense-predicted-damaging variants in). Both literature watchers send only
-  rsIDs / gene symbols, and are deduped so a paper never surfaces twice.
+- **PubMed (gene-level literature)** — recent genetics papers on your notable genes (ones you carry
+  pathogenic, pharmacogenomic, or AlphaMissense-predicted-damaging variants in), filtered to papers that
+  name the gene in a variant/mutation context and rolled up to one changelog line per gene so this
+  lowest-signal source can't drown the rest. Both literature watchers send only rsIDs / gene symbols,
+  and are deduped so a paper never surfaces twice.
 - **GWAS Catalog** — when a new catalog release lands, re-scans the variants you carry and flags
   newly-published genome-wide-significant associations (weak single hits, not a calibrated score).
   Fully local — nothing variant-specific leaves the machine.

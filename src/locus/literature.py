@@ -142,14 +142,46 @@ def pubmed_search(term: str, *, mindate: str | None = None, maxdate: str | None 
     return hits
 
 
+# A gene must co-occur with an actual genetics/variant word in the title or abstract — not just be
+# gene2pubmed-linked. Deliberately [tiab] (title/abstract), NOT [MeSH]: the weekly watcher queries
+# the last ~week, and brand-new papers aren't MeSH-indexed yet, so a MeSH filter would silently drop
+# most recent hits (measured: ~⅔ of the last fortnight's BRCA2 papers). The old catch-all clause
+# `(variant OR mutation OR ... OR clinical)` matched ~everything ("clinical"/"variant" are ubiquitous)
+# — this cut a noisy gene like MET from ~11k papers to a few hundred while keeping BRCA2's real signal.
+_GENE_GENETICS_TIAB = (
+    '(mutation[tiab] OR variant[tiab] OR variants[tiab] OR polymorphism[tiab] '
+    'OR genotype[tiab] OR allele[tiab] OR "loss of function"[tiab] OR pathogenic[tiab] '
+    'OR "genetic variant"[tiab])'
+)
+
+
+def _gene_term(gene: str) -> str:
+    """High-precision PubMed term for a gene symbol: the gene entity AND a genetics word in the
+    title/abstract. Used by both the weekly watcher and the interactive lookup so they stay in sync."""
+    return f"{gene}[Gene] AND {_GENE_GENETICS_TIAB}"
+
+
+def _mentions_gene(hit: PubMedHit, gene: str) -> bool:
+    """Backstop for symbol-collision / pure-linkage noise: keep a hit only if the gene symbol
+    actually appears (whole word) in its title or abstract. Catches papers that [Gene] links but
+    never name — including recent ones that arrive before MeSH indexing could have filtered them.
+
+    Case-SENSITIVE on purpose: HGNC symbols are uppercase in text (MET, BRCA2, C9orf72), whereas the
+    English words they collide with are lowercase ("met", "set"). Measured on a noisy gene, this drops
+    the false hits (MET: 5→1) with no loss on real ones (BRCA2/RIPK1 unchanged). A human-genome tool
+    can accept missing the rare rodent-cased ortholog ("Lgals3") for that precision."""
+    pattern = re.compile(rf"\b{re.escape(gene)}\b")
+    return bool(pattern.search(hit.title or "") or pattern.search(hit.abstract or ""))
+
+
 def _term_for(query: str) -> str:
     """Build a PubMed term from a free query: an rsID stays literal, a bare gene symbol gets the
-    [Gene] tag (scoped to variant/clinical papers), anything else passes through."""
+    high-precision gene term, anything else passes through."""
     q = query.strip()
     if re.fullmatch(r"rs\d+", q, re.IGNORECASE):
         return q
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{1,9}", q):
-        return f"{q}[Gene] AND (variant OR mutation OR polymorphism OR pathogenic OR clinical)"
+        return _gene_term(q)
     return q
 
 

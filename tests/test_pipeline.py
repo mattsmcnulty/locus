@@ -508,7 +508,22 @@ def test_literature_term_for():
 
     assert _term_for("rs334") == "rs334"                      # rsID stays literal
     assert _term_for("BRCA2").startswith("BRCA2[Gene]")       # bare symbol gets [Gene]
+    assert "[tiab]" in _term_for("BRCA2"), "gene term must require a genetics word in title/abstract"
+    assert "clinical" not in _term_for("BRCA2"), "the old catch-all clause is gone"
     assert _term_for("breast cancer risk") == "breast cancer risk"  # free text passes through
+
+
+def test_mentions_gene():
+    """The relevance gate keeps a hit only if the symbol appears (whole word, case-sensitive) in
+    title/abstract — HGNC symbols are uppercase, so the lowercase English collisions get dropped."""
+    from locus.literature import PubMedHit, _mentions_gene
+
+    assert _mentions_gene(PubMedHit(pmid="1", title="BRCA1 variant in breast cancer"), "BRCA1")
+    assert _mentions_gene(PubMedHit(pmid="2", title="A study", abstract="the XIAP gene"), "XIAP")
+    assert not _mentions_gene(PubMedHit(pmid="3", title="unrelated topic", abstract="no symbol"), "BRCA1")
+    assert not _mentions_gene(PubMedHit(pmid="4", title="METABOLISM of lipids"), "MET")  # whole-word only
+    assert not _mentions_gene(PubMedHit(pmid="5", title="we met the endpoint"), "MET")   # lowercase verb
+    assert _mentions_gene(PubMedHit(pmid="6", title="MET amplification in NSCLC"), "MET")  # real symbol
 
 
 def test_pubmed_search_parses(monkeypatch):
@@ -566,18 +581,33 @@ def test_pubmed_findings_dedup(genome, monkeypatch):
         con.execute("CREATE TABLE IF NOT EXISTS watch_seen_ids(source VARCHAR, external_id VARCHAR)")
         con.execute("INSERT INTO watch_seen_ids VALUES ('pubmed', 'SEEN1')")
 
-    hits = [literature.PubMedHit(pmid="SEEN1", title="old", gene="BRCA1"),
-            literature.PubMedHit(pmid="NEW1", title="new paper", abstract="A", gene="BRCA1")]
+    hits = [literature.PubMedHit(pmid="SEEN1", title="old BRCA1 paper", gene="BRCA1"),
+            literature.PubMedHit(pmid="NEW1", title="new BRCA1 paper", abstract="A variant", gene="BRCA1")]
     monkeypatch.setattr(literature, "pubmed_search", lambda *a, **k: hits)
 
     check = {"since": "2026-01-01", "first_run": False}
     findings = refresh._pubmed_findings(check)
-    assert [f.title for f in findings] == ["New paper on BRCA1: new paper"]
+    assert [f.title for f in findings] == ["1 new genetics paper on BRCA1"]  # rolled up per gene
+    assert findings[0].kind == "new_studies" and findings[0].tier == "info"
     assert check["new_pmids"] == ["NEW1"]          # SEEN1 excluded, not re-marked
 
     check2 = {"since": "2026-01-01", "first_run": True}
     assert refresh._pubmed_findings(check2) == []  # baseline: emit nothing…
     assert check2["new_pmids"] == ["NEW1"]         # …but still record the unseen PMID
+
+
+def test_pubmed_rollup():
+    """Many new papers on one gene collapse to a single changelog line (count + newest title)."""
+    from locus.literature import PubMedHit
+    from locus.refresh import _rollup_pubmed_finding
+
+    hits = [PubMedHit(pmid="1", title="Newest MYH7 study", year="2026"),
+            PubMedHit(pmid="2", title="Older MYH7 study", year="2025")]
+    f = _rollup_pubmed_finding("MYH7", hits)
+    assert f.title == "2 new genetics papers on MYH7"
+    assert "Newest MYH7 study" in f.detail and f.url == "https://pubmed.ncbi.nlm.nih.gov/1/"
+    one = _rollup_pubmed_finding("MYH7", hits[:1])
+    assert one.title == "1 new genetics paper on MYH7"  # singular
 
 
 def test_annotate_refuses_to_shrink_the_store(genome, monkeypatch):

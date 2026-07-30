@@ -428,11 +428,29 @@ def check_pubmed(man: dict) -> dict | None:
             "first_run": not prev, "changed": True, "url": "https://pubmed.ncbi.nlm.nih.gov/"}
 
 
+def _rollup_pubmed_finding(gene: str, hits: list) -> Finding:
+    """One changelog line per gene — "N new genetics papers on GENE" — instead of one row per
+    paper. The gene-level free-text sweep is inherently lower-signal than the variant-level watchers
+    (LitVar/ClinVar/ClinGen), so it must not drown them; the newest title + links live in the detail,
+    and ``literature_for(gene)`` fetches the full list on demand."""
+    n = len(hits)
+    newest = hits[0]  # pubmed_search returns date-sorted (most recent first)
+    titles = " | ".join(h.title[:120] for h in hits[:5])
+    detail = f"Most recent: {newest.title[:200]}"
+    if n > 1:
+        detail += f". Also: {titles}"
+    return Finding(
+        source="pubmed", kind="new_studies", tier="info", gene=gene,
+        title=f"{n} new genetics paper{'s' if n != 1 else ''} on {gene}",
+        detail=detail[:600], release=newest.year or None, url=newest.url)
+
+
 def _pubmed_findings(check: dict) -> list[Finding]:
     """Search PubMed for recent papers on the genome's notable genes; dedup against seen PMIDs.
 
     On the first run we seed the seen-set from a bounded recent window but emit nothing (baseline),
     so later runs surface only genuinely new papers. Mutates ``check['new_pmids']`` for mark_seen.
+    New papers are rolled up to one finding per gene so the gene-level sweep can't flood the changelog.
     """
     from . import literature
 
@@ -446,20 +464,17 @@ def _pubmed_findings(check: dict) -> list[Finding]:
     findings: list[Finding] = []
     new_ids: list[str] = []
     for gene in genes:
+        fresh: list = []
         for h in literature.pubmed_search(
-                f"{gene}[Gene] AND (variant OR mutation OR polymorphism OR pathogenic OR clinical)",
-                mindate=since, retmax=5, gene=gene):
+                literature._gene_term(gene), mindate=since, retmax=5, gene=gene):
             if h.pmid in seen or h.pmid in new_ids:
                 continue
+            if not literature._mentions_gene(h, gene):
+                continue  # [Gene]-linked but never names the gene in title/abstract — drop as noise
             new_ids.append(h.pmid)
-            if first:
-                continue  # baseline only — don't flood with a backlog on first run
-            snippet = (h.abstract[:300] + "…") if len(h.abstract) > 300 else h.abstract
-            findings.append(Finding(
-                source="pubmed", kind="new_study", tier="info", gene=gene,
-                title=f"New paper on {gene}: {h.title[:160]}",
-                detail=snippet or f"{h.journal} {h.year}".strip(),
-                release=h.year or None, url=h.url))
+            fresh.append(h)
+        if fresh and not first:  # baseline seeds the seen-set silently; else one finding per gene
+            findings.append(_rollup_pubmed_finding(gene, fresh))
     check["new_pmids"] = new_ids
     return findings
 

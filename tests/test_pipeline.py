@@ -84,9 +84,10 @@ def test_ingest_load_query(genome, monkeypatch):
     # Load into DuckDB.
     load.run()
 
-    # 4 variant records: SNV(5), split multiallelic(7 x2), left-aligned indel(8).
+    # 5 variant records: chr21 SNV(5), split multiallelic(7 x2), left-aligned indel(8),
+    # plus the hemizygous chrX SNV(5).
     ov = queries.overview()
-    assert ov["variants"] == 4
+    assert ov["variants"] == 5
     assert ov["clinvar_annotated"] == 2
 
     # Indel was left-aligned from pos 11 (AA>A) to pos 8 (TA>T).
@@ -95,6 +96,12 @@ def test_ingest_load_query(genome, monkeypatch):
 
     # rsID preserved.
     assert queries.lookup_by_rsid("rs5000").total == 1
+
+    # Hemizygous chrX call survives ingest->load as a single-allele genotype (not NULL), the whole
+    # point of the haploid fix; the dossier labels it hemizygous rather than leaving zygosity blank.
+    x = queries.lookup_by_rsid("rsX0001")
+    assert x.total == 1 and x.hits[0].gt == "1"
+    assert queries._zygosity(x.hits[0].gt) == "hemizygous-alternate"
 
     # Clinical findings default to pathogenic only (Benign excluded).
     cf = queries.clinical_findings()
@@ -120,7 +127,7 @@ def test_sql_guard_blocks_mutations(genome):
     with pytest.raises(ValueError):
         queries.run_sql("UPDATE variants SET pos = 0")
     # A legitimate read works.
-    assert queries.run_sql("SELECT count(*) FROM variants")["rows"][0][0] == 4
+    assert queries.run_sql("SELECT count(*) FROM variants")["rows"][0][0] == 5
 
 
 def test_noncprefixed_bcftools_gvcf(tmp_path):
@@ -406,6 +413,37 @@ def test_risk_dosage():
     assert _risk_dosage("A", ["G"], g(0, 1), "C") == 1    # strand flip C->G
     assert _risk_dosage("A", ["T"], g(0, 1), "C") is None  # risk neither at site nor its complement
     assert _risk_dosage("A", ["G"], g(-1, -1), "G") is None  # no-call
+
+
+def test_fmt_gt_ploidy():
+    """`_fmt_gt` must format any ploidy cyvcf2 returns. A fixed 2-allele unpack dropped every
+    haploid (hemizygous X/Y, mitochondrial) call to None — the entire non-PAR sex genome + mito."""
+    from locus.load import _fmt_gt
+
+    class V:  # minimal cyvcf2.Variant stand-in
+        def __init__(self, g):
+            self.genotypes = [g]
+
+    assert _fmt_gt(V([1, False])) == "1"       # hemizygous ALT (the XIAP / F8 case)
+    assert _fmt_gt(V([0, False])) == "0"       # hemizygous REF
+    assert _fmt_gt(V([0, 1, False])) == "0/1"  # diploid het (unchanged)
+    assert _fmt_gt(V([1, 1, False])) == "1/1"  # diploid hom-alt (unchanged)
+    assert _fmt_gt(V([0, 1, True])) == "0|1"   # phased (unchanged)
+    assert _fmt_gt(V([-1, False])) == "."      # haploid no-call
+    assert _fmt_gt(V([-1, -1, False])) == "./."  # diploid no-call
+
+
+def test_zygosity_labels():
+    """Haploid calls get a hemizygous label instead of the old silent None."""
+    from locus.queries import _zygosity
+
+    assert _zygosity("1") == "hemizygous-alternate"
+    assert _zygosity("0") == "hemizygous-reference"
+    assert _zygosity("0/1") == "heterozygous"
+    assert _zygosity("1/1") == "homozygous-alternate"
+    assert _zygosity("0|0") == "homozygous-reference"
+    assert _zygosity(None) is None
+    assert _zygosity("./.") is None
 
 
 def test_refresh_dry_run_no_writes(genome, monkeypatch):
@@ -798,12 +836,14 @@ def test_carrier_status_zygosity_and_honesty(genome):
              ("chr7", 117559590, "A", "G", "CFTR", "Pathogenic", "1/1", "rsB"),      # hom -> affected
              ("chr15", 72346580, "G", "A", "HEXA", "Pathogenic", "0/1", "rsC"),      # 2 P/LP in one
              ("chr15", 72346590, "T", "C", "HEXA", "Likely_pathogenic", "0/1", "rsD"),  # gene -> affected
+             ("chrX", 154533000, "C", "T", "F8", "Pathogenic", "1", "rsF"),          # hemizygous male
              ("chr1", 100, "A", "G", "PAH", "Benign", "0/1", "rsE")],                # benign -> ignored
         )
     by_gene = {h.gene: h for h in queries.carrier_status().hits}
     assert by_gene["PAH"].status == "carrier" and by_gene["PAH"].n_variants == 1
     assert by_gene["CFTR"].status == "likely_affected", "homozygous P/LP is not merely a carrier"
     assert by_gene["HEXA"].status == "likely_affected", "two P/LP in one gene = presumed compound het"
+    assert by_gene["F8"].status == "likely_affected", "hemizygous X-linked P/LP male is affected, not a carrier"
     assert by_gene["PAH"].condition == "Phenylketonuria (PKU)"
     # Benign never contributes.
     assert by_gene["PAH"].n_variants == 1

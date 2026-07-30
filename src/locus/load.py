@@ -122,12 +122,20 @@ def _variant_batches(path: Path):
 
 
 def _fmt_gt(v) -> str | None:
+    # cyvcf2 returns [a1, ..., phased]: diploid [0, 1, False], haploid [1, False]. Splitting the
+    # trailing phase bool from the alleles handles any ploidy — a fixed 2-allele unpack dropped
+    # every hemizygous X/Y and haploid MT call to None (the whole non-PAR sex genome + mito).
     try:
-        a, b, *_ = v.genotypes[0]
-        sep = "|" if v.genotypes[0][2] else "/"
-        return f"{'.' if a < 0 else a}{sep}{'.' if b < 0 else b}"
+        g = v.genotypes[0]
     except (IndexError, TypeError):
         return None
+    if not g:
+        return None
+    *alleles, phased = g
+    if not alleles:
+        return None
+    sep = "|" if phased else "/"
+    return sep.join("." if a < 0 else str(a) for a in alleles)
 
 
 # Tables from features that were removed. They survive in stores built by older versions because

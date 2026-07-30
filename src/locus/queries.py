@@ -194,11 +194,13 @@ def secondary_findings(limit: int = 100, offset: int = 0) -> VariantPage:
     rec = sorted(ACMG_SF_RECESSIVE)
     rec_ph = ", ".join("?" for _ in rec)
     # Dominant genes: any P/LP. Recessive genes: only if biallelic — homozygous (gt not 0/x),
-    # or ≥2 P/LP variants in that same gene (presumed compound het; phase is unknown from a VCF).
+    # hemizygous (a single ALT allele on a haploid X/Y/MT call — one copy is affecting, e.g. GLA
+    # in a male), or ≥2 P/LP variants in that same gene (presumed compound het; phase is unknown
+    # from a VCF).
     where = (
         f"{plp} AND upper(gene) IN ({placeholders}) AND ("
         f"  upper(gene) NOT IN ({rec_ph})"
-        f"  OR gt IN ('1/1', '1|1')"
+        f"  OR gt IN ('1/1', '1|1', '1')"
         f"  OR (SELECT count(*) FROM variants v2 WHERE upper(v2.gene) = upper(variants.gene)"
         f"      AND {plp.replace('clnsig', 'v2.clnsig')}) >= 2"
         f")"
@@ -254,7 +256,7 @@ def carrier_status(limit: int = 100) -> CarrierReport:
            "AND lower(clnsig) NOT LIKE '%conflicting%'")
     with connect(read_only=True) as con:
         rows = con.execute(
-            f"SELECT upper(gene), count(*), max(CASE WHEN gt IN ('1/1','1|1') THEN 1 ELSE 0 END), "
+            f"SELECT upper(gene), count(*), max(CASE WHEN gt IN ('1/1','1|1','1') THEN 1 ELSE 0 END), "
             f"       any_value(gt), any_value(rsid), any_value(clnsig), any_value(clndn) "
             f"FROM variants WHERE {plp} AND upper(gene) IN ({ph}) GROUP BY upper(gene)",
             [g.upper() for g in genes],
@@ -263,8 +265,9 @@ def carrier_status(limit: int = 100) -> CarrierReport:
     hits: list[CarrierHit] = []
     for gene, n, has_hom, gt, rsid, clnsig, clndn in rows:
         info = by_gene[gene]
-        # Two copies (homozygous, or ≥2 P/LP variants — phase unknown from a VCF, so compound-het
-        # is presumed rather than proven) means possibly affected, not merely a carrier.
+        # Two affecting copies (homozygous, or ≥2 P/LP variants — phase unknown from a VCF, so
+        # compound-het is presumed rather than proven) — or a single hemizygous copy on X/Y/MT —
+        # means possibly affected, not merely a carrier.
         affected = bool(has_hom) or n >= 2
         hits.append(CarrierHit(
             gene=gene, condition=info.condition, inheritance=info.inheritance,
@@ -620,7 +623,8 @@ class VariantDossier(BaseModel):
     found: bool = Field(description="False = no record in this genome's variant table")
     gene: str | None = None
     genotype: str | None = None
-    zygosity: str | None = Field(default=None, description="heterozygous | homozygous-alternate | homozygous-reference")
+    zygosity: str | None = Field(default=None, description="heterozygous | homozygous-{ref,alt} | "
+                                 "hemizygous-{ref,alt} for haploid X/Y/MT calls")
     consequence: str | None = None
     clinvar: str | None = Field(default=None,
                                 description="CLINICAL evidence — the strongest signal here")
@@ -649,8 +653,10 @@ def _zygosity(gt: str | None) -> str | None:
     if not gt:
         return None
     a = [x for x in re.split(r"[/|]", gt) if x not in ("", ".")]
-    if len(a) < 2:
+    if not a:
         return None
+    if len(a) == 1:  # haploid call (non-PAR X/Y or mitochondrial) — one copy present
+        return "hemizygous-reference" if a[0] == "0" else "hemizygous-alternate"
     if a[0] == a[1]:
         return "homozygous-reference" if a[0] == "0" else "homozygous-alternate"
     return "heterozygous"

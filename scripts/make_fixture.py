@@ -23,10 +23,16 @@ from pathlib import Path
 SEQ = "ACGTACGTAAAACGTAGGGTTTTACGTACGTACGTACGTTTACGTACGTACGTACGTACGT"
 CONTIG = "chr21"
 
+# A short "chrX" so the fixture exercises a HAPLOID (hemizygous) call — the non-PAR sex genome and
+# mitochondria come back from the caller as single-allele GTs (e.g. "1"), which a diploid-only
+# genotype parser silently dropped to NULL. Kept separate from chr21 to keep left-align tests intact.
+X_SEQ = "ACGTTGCAACGTACGTTGCAACGTACGTTGCAACGT"
+X_CONTIG = "chrX"
 
-def ref_at(pos: int, length: int = 1) -> str:
+
+def ref_at(pos: int, length: int = 1, seq: str = SEQ) -> str:
     """1-based reference allele of given length."""
-    return SEQ[pos - 1 : pos - 1 + length]
+    return seq[pos - 1 : pos - 1 + length]
 
 
 def build_vcf() -> str:
@@ -34,6 +40,7 @@ def build_vcf() -> str:
     header = f"""##fileformat=VCFv4.2
 ##reference=file:///synthetic/GRCh38_no_alt.fa
 ##contig=<ID={CONTIG},length={L}>
+##contig=<ID={X_CONTIG},length={len(X_SEQ)}>
 ##ALT=<ID=NON_REF,Description="Represents any possible alternative allele not already represented">
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=LowDepth,Description="DP<=1">
@@ -44,8 +51,8 @@ def build_vcf() -> str:
 ##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE"""
 
-    def row(pos, id_, ref, alt, info, gt, qual="50"):
-        return f"{CONTIG}\t{pos}\t{id_}\t{ref}\t{alt}\t{qual}\tPASS\t{info}\tGT:DP:GQ\t{gt}:30:50"
+    def row(pos, id_, ref, alt, info, gt, qual="50", contig=CONTIG):
+        return f"{contig}\t{pos}\t{id_}\t{ref}\t{alt}\t{qual}\tPASS\t{info}\tGT:DP:GQ\t{gt}:30:50"
 
     rows = [
         # hom-ref block 1..4 -> dropped
@@ -58,6 +65,8 @@ def build_vcf() -> str:
         row(11, ".", ref_at(11, 2), "A,<NON_REF>", "DP=25", "0/1"),
         # hom-ref block 30..39 -> dropped
         row(30, ".", ref_at(30), "<NON_REF>", "END=39", "0/0"),
+        # HEMIZYGOUS chrX SNV: haploid GT "1" -> must load as gt='1', not NULL. rsID for lookup.
+        row(5, "rsX0001", ref_at(5, seq=X_SEQ), "A,<NON_REF>", "DP=30", "1", contig=X_CONTIG),
     ]
     return header + "\n" + "\n".join(rows) + "\n"
 
@@ -113,9 +122,9 @@ def main(base: Path) -> None:
     ref_dir.mkdir(parents=True, exist_ok=True)
     genome_dir.mkdir(parents=True, exist_ok=True)
 
-    # Reference FASTA -> bgzip -> faidx
+    # Reference FASTA -> bgzip -> faidx (chr21 + a short chrX for the hemizygous call)
     fa = ref_dir / "synthetic_GRCh38.fa"
-    fa.write_text(f">{CONTIG}\n{SEQ}\n")
+    fa.write_text(f">{CONTIG}\n{SEQ}\n>{X_CONTIG}\n{X_SEQ}\n")
     subprocess.run(["bgzip", "-f", str(fa)], check=True)
     fa_gz = ref_dir / "synthetic_GRCh38.fa.gz"
     subprocess.run(["samtools", "faidx", str(fa_gz)], check=True)

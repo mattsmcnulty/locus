@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "locus": {
-      "type": "stdio",
-      "command": "uv",
-      "args": ["run", "locus-mcp"]
-    }
-  }
-}

@@ -57,5 +57,10 @@ pharmcat*.jar
 snpEff*.jar
 *.jar
 
-# Local agent guidance (kept on-disk, not published)
+# Local agent guidance / tooling config (kept on-disk, not published)
 CLAUDE.md
+AGENTS.md
+BALLADEER.md
+.cursor/
+# Local MCP config (points at private/internal servers, e.g. balladeer)
+.mcp.json

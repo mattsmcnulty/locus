@@ -141,6 +141,7 @@ def doctor() -> None:
             "locus download ancestry")
     _db_row("GWAS Catalog", (ann / "gwas" / "gwas-catalog-associations.tsv").exists(), "locus download gwas")
     _db_row("ClinGen validity", (ann / "clingen" / "gene-disease-summary.csv").exists(), "locus download clingen")
+    _db_row("Big Five weights", download.bigfive_weights_path("neu").exists(), "locus download bigfive")
     _db_row("Haplogrep (mtDNA)", (ann / "haplogrep" / "haplogrep.jar").exists(), "locus download haplogrep",
             needs_java=True)
 
@@ -228,7 +229,7 @@ def ingest(
 @app.command()
 def download(
     target: str = typer.Argument(
-        "all", help="reference|clinvar|snpeff|pharmcat|alphamissense|ancestry|haplogrep|gwas|all"),
+        "all", help="reference|clinvar|snpeff|pharmcat|alphamissense|ancestry|haplogrep|gwas|clingen|bigfive|all"),
 ) -> None:
     """Download & prepare reference and annotation databases."""
     from . import download as _download
@@ -271,6 +272,18 @@ def ancestry() -> None:
     scores = _pgs.run(nearest_superpop=anc.nearest)
     _load.write_ancestry(anc, scores)
     console.print("[green]Ancestry + polygenic scores written to the database.[/]")
+
+
+@app.command()
+def bigfive() -> None:
+    """Big Five personality polygenic indices (Schwaba et al. 2026), ancestry-calibrated — their own
+    spot, separate from polygenic risk. Needs `locus download bigfive` (and `locus ancestry` for percentiles)."""
+    from . import bigfive as _bigfive
+    from . import load as _load
+
+    settings.ensure_dirs()
+    scores = _bigfive.run()
+    _load.write_bigfive(scores)
 
 
 @app.command()

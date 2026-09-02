@@ -218,6 +218,19 @@ def polygenic_risk() -> PolygenicRiskReport:
 
 
 @mcp.tool()
+def big_five() -> queries.BigFiveReport:
+    """Big Five personality polygenic indices — extraversion, agreeableness, conscientiousness,
+    neuroticism, openness — from Schwaba et al. (Nature 2026), each as an ancestry-matched percentile
+    with a z-score and the expected shift in the actual trait (in SD). Deliberately SEPARATE from
+    `polygenic_risk`: a personality index is a weak behavioural tilt (these explain ~1–4% of variance),
+    not disease liability — always relay the `caveat`. Requires `locus bigfive` to have run."""
+    err = _require_db()
+    if err:
+        return queries.BigFiveReport(scores=[], note=err)
+    return queries.big_five()
+
+
+@mcp.tool()
 def gwas_associations(trait: str = "", limit: int = 100) -> queries.AssociationPage:
     """GWAS Catalog risk alleles THIS genome carries (genome-wide significant, p<5e-8), optionally
     filtered by `trait` substring (e.g. 'type 2 diabetes', 'height'). WEAK / EXPLORATORY: single hits

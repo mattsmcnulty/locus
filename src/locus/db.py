@@ -19,7 +19,8 @@ from .config import settings
 # v2: added sources + watch_seen_ids + watch_findings (the "living" refresh spine).
 # v3: traits + associations tables; ancestry_pca gained a `group` (continent) column.
 # v4: watch_findings gained a `url` column (clickable citations for PubMed/GWAS findings).
-SCHEMA_VERSION = 4
+# v5: personality_pgi table (Big Five PGIs — its own spot, separate from pgs_scores).
+SCHEMA_VERSION = 5
 
 
 @contextmanager

@@ -215,7 +215,8 @@ def test_mcp_stdio_tools_respond(genome):
                 await asyncio.wait_for(session.initialize(), timeout=30)
                 tools = await asyncio.wait_for(session.list_tools(), timeout=30)
                 by_name = {t.name: t for t in tools.tools}
-                assert {"structural_variants", "polygenic_risk", "genome_overview"} <= set(by_name)
+                assert {"structural_variants", "polygenic_risk", "genome_overview", "big_five"} <= set(by_name)
+                assert {"scores", "caveat"} <= set(by_name["big_five"].outputSchema["properties"])
 
                 # These two must expose a named object output schema, NOT FastMCP's
                 # generic {"result": [...]} list wrapper, which strict clients won't
@@ -1115,3 +1116,99 @@ def test_litvar_findings_dedup(genome, monkeypatch):
     check2 = {"first_run": True}
     assert refresh._litvar_findings(check2) == []   # baseline: silent
     assert check2["new_pmids"] == ["NEW9"]
+
+
+# ── Big Five personality PGIs (their own spot, separate from polygenic risk) ─────────
+class _FakeLifter:
+    """pyliftover-shaped: 0-based in, [(chrom, 0-based pos, strand, score)] out."""
+    def convert_coordinate(self, chrom, pos0):
+        table = {("chr1", 99): [("chr1", 1099, "+", 1)],       # plain lift
+                 ("chr2", 199): [("chr2", 2199, "-", 1)],      # minus strand -> complement alleles
+                 ("chr3", 299): [],                            # failed lift
+                 ("chr4", 399): [("chr9", 4399, "+", 1)]}      # cross-chromosome -> drop
+        return table.get((chrom, pos0), [])
+
+
+def test_bigfive_lift_rows():
+    from locus.bigfive import lift_rows
+
+    rows = [("1", 100, "A", "G", "0.1"), ("2", 200, "A", "C", "-0.2"),
+            ("3", 300, "T", "C", "0.3"), ("4", 400, "G", "T", "0.4")]
+    out, st = lift_rows(rows, _FakeLifter())
+    assert out == [("1", 1100, "A", "G", "0.1"),        # 1-based out
+                   ("2", 2200, "T", "G", "-0.2")]       # A->T, C->G on the minus strand
+    assert st == {"in": 4, "lifted": 2, "fail": 1, "cross_chrom": 1, "minus_strand": 1}
+
+
+def test_bigfive_convert_writes_locus_format(tmp_path, monkeypatch):
+    """The GRCh37 SBayesR file becomes a Locus hmPOS_GRCh38 scoring file the existing engine parses."""
+    import pyliftover
+
+    from locus import bigfive, download, pgs
+
+    monkeypatch.setattr(download, "bigfive_dir", lambda: tmp_path)
+    monkeypatch.setattr(download, "liftover_chain_path", lambda: tmp_path / "chain.gz")
+    monkeypatch.setattr(pyliftover, "LiftOver", lambda *_a, **_k: _FakeLifter())
+    (tmp_path / "ReGPC_neu_PGI_SBayesR.txt").write_text(
+        "Id Name Chrom Position A1 A2 A1Frq A1Effect SE PIP LastSampleEff chrid\n"
+        "1 rs1 1 100 A G 0.5 0.1 0.01 0.9 0 1:100A,G\n"
+        "2 rs2 2 200 A C 0.5 -0.2 0.01 0.9 0 2:200A,C\n")
+    out = bigfive.convert("neu")
+    variants, meta = pgs.parse_scoring_file(out)
+    assert meta["pgs_id"] == "ReGPC_neu" and "GRCh38" in meta["genome_build"]
+    assert [(v.chrom, v.pos, v.effect_allele, v.other_allele, v.weight) for v in variants] == [
+        ("chr1", 1100, "A", "G", 0.1), ("chr2", 2200, "T", "G", -0.2)]
+
+
+def test_bigfive_convert_refuses_partial_lift(tmp_path, monkeypatch):
+    """A bad chain/file lifts almost nothing; scoring that would report a confident-looking
+    number on a fraction of the index. Refuse instead."""
+    import pyliftover
+    import pytest
+
+    from locus import bigfive, download, shell
+
+    monkeypatch.setattr(download, "bigfive_dir", lambda: tmp_path)
+    monkeypatch.setattr(download, "liftover_chain_path", lambda: tmp_path / "chain.gz")
+    monkeypatch.setattr(pyliftover, "LiftOver", lambda *_a, **_k: _FakeLifter())
+    (tmp_path / "ReGPC_ext_PGI_SBayesR.txt").write_text(
+        "Id Name Chrom Position A1 A2 A1Frq A1Effect SE PIP LastSampleEff chrid\n"
+        + "".join(f"{i} rs{i} 3 300 T C 0.5 0.1 0.01 0.9 0 3:300T,C\n" for i in range(20)))
+    with pytest.raises(shell.ToolError) as e:
+        bigfive.convert("ext")
+    assert "lifted" in str(e.value) and "locus download bigfive" in str(e.value)
+
+
+def test_bigfive_run_skips_without_weights(genome, monkeypatch):
+    """No weights on disk = self-skip with a hint (never a crash, never a network call)."""
+    from locus import bigfive, download
+
+    monkeypatch.setattr(download, "bigfive_dir", lambda: genome / "nope")
+    monkeypatch.setattr(download, "liftover_chain_path", lambda: genome / "nope" / "chain.gz")
+    assert bigfive.run() == []
+
+
+def test_write_bigfive_refuses_to_wipe_and_is_preserved(genome):
+    """Its own table: written by `locus bigfive`, never wiped by an empty compute, and preserved
+    across a variant reload exactly like ancestry/pgs. And it must NOT leak into polygenic_risk."""
+    from locus import ingest, load, queries
+    from locus.bigfive import BigFiveScore
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    assert queries.big_five().scores == [] and "locus bigfive" in queries.big_five().note
+
+    # Synthetic values — never a real person's result.
+    load.write_bigfive([BigFiveScore("ext", "Extraversion", 0.5, 75.0, 0.67, "EUR", 1000, 0.99, 0.19)])
+    rep = queries.big_five()
+    assert [s.trait for s in rep.scores] == ["Extraversion"]
+    assert rep.scores[0].expected_shift_sd == round(0.67 * 0.19, 3)
+    assert "tilt" in rep.caveat and rep.source
+    assert queries.polygenic_risk() == [], "personality indices must stay out of the health PGS answer"
+
+    load.write_bigfive([])   # empty compute keeps the good table
+    load.run()               # variant reload preserves it
+    with connect(read_only=True) as con:
+        assert con.execute("SELECT count(*) FROM personality_pgi").fetchone()[0] == 1

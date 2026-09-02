@@ -17,6 +17,7 @@ dependencies = [
     "typer>=0.15",        # CLI
     "rich>=13.9",         # pretty CLI output
     "httpx>=0.27",        # optional API-based annotation fallbacks
+    "pyliftover>=0.4.1",
 ]
 
 [project.optional-dependencies]

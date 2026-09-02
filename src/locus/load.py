@@ -189,6 +189,12 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             pgs_id VARCHAR, trait VARCHAR, raw DOUBLE, percentile DOUBLE,
             ancestry VARCHAR, n_used INTEGER, coverage DOUBLE
         );
+        -- Big Five personality polygenic indices (Schwaba 2026): a SEPARATE spot from health
+        -- polygenic risk (pgs_scores) — a behavioural tilt, not clinical liability. Preserved.
+        CREATE TABLE IF NOT EXISTS personality_pgi(
+            code VARCHAR, trait VARCHAR, raw DOUBLE, percentile DOUBLE, z DOUBLE,
+            ancestry VARCHAR, n_used INTEGER, coverage DOUBLE, beta DOUBLE, source VARCHAR
+        );
         -- The "living" refresh spine: which source versions we last saw, IDs already
         -- processed, and the ranked "what's new since last run" findings. All three
         -- are PRESERVED across a variant reload (not in run()'s drop list).
@@ -217,6 +223,36 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             or_beta VARCHAR, pmid VARCHAR
         );
     """)
+
+
+def write_bigfive(scores: list) -> None:
+    """Write the Big Five personality PGIs (``locus bigfive``) into their own table.
+
+    Same guard as the other deep-interpretation writers: an empty input means the upstream step
+    failed or was skipped (weights missing), not that the true answer is "no scores" — so it
+    keeps the existing table rather than replacing it with nothing.
+    """
+    import duckdb as _d
+
+    from .config import settings
+
+    if not scores:
+        console.print("[yellow]Big Five: no scores computed — keeping the existing personality_pgi "
+                      "table rather than replacing it with nothing.[/]")
+        return
+    from .bigfive import PAPER
+
+    con = _d.connect(str(settings.db_path))
+    try:
+        con.execute("DROP TABLE IF EXISTS personality_pgi")
+        _create_schema(con)
+        con.executemany("INSERT INTO personality_pgi VALUES (?,?,?,?,?,?,?,?,?,?)", [
+            (s.code, s.trait, s.raw, s.percentile, s.z, s.ancestry, s.n_used, s.coverage, s.beta, PAPER)
+            for s in scores
+        ])
+        console.print(f"[green]Big Five: {len(scores)} personality indices written.[/]")
+    finally:
+        con.close()
 
 
 def write_ancestry(ancestry_result, pgs_scores: list) -> None:

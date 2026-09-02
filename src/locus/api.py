@@ -95,6 +95,12 @@ def pgs():
     return queries.polygenic_risk()
 
 
+@app.get("/api/bigfive")
+def bigfive():
+    _guard_db()
+    return queries.big_five()
+
+
 @app.get("/api/whats_new")
 def whats_new(since: str = "", tier: str = ""):
     _guard_db()

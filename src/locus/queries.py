@@ -438,6 +438,49 @@ def polygenic_risk() -> list[PgsResult]:
     ]
 
 
+class BigFiveScore(BaseModel):
+    code: str = Field(description="ext | agr | con | neu | ope")
+    trait: str
+    percentile: float | None = Field(default=None, description="Within the ancestry-matched reference (0-100)")
+    z: float | None = Field(default=None, description="Standardized against that reference distribution")
+    expected_shift_sd: float | None = Field(
+        default=None, description="z × the paper's validation beta: the expected shift in the actual trait, in SD")
+    ancestry: str | None = Field(default=None, description="Superpopulation the percentile is relative to")
+    raw: float
+    n_used: int
+    coverage: float
+    beta: float = Field(description="The paper's EUR validation beta for this trait (index→trait, per SD)")
+
+
+class BigFiveReport(BaseModel):
+    scores: list[BigFiveScore] = Field(description="One entry per Big Five trait, highest percentile first")
+    source: str = ""
+    caveat: str = ""
+    note: str = ""
+
+
+def big_five() -> BigFiveReport:
+    """Big Five personality PGIs — deliberately separate from polygenic_risk (a tilt, not liability)."""
+    from .bigfive import CAVEAT, PAPER
+
+    try:
+        with connect(read_only=True) as con:
+            rows = con.execute(
+                "SELECT code, trait, raw, percentile, z, ancestry, n_used, coverage, beta "
+                "FROM personality_pgi ORDER BY percentile DESC NULLS LAST, trait"
+            ).fetchall()
+    except Exception:  # noqa: BLE001 - table absent = never run
+        rows = []
+    if not rows:
+        return BigFiveReport(scores=[], source=PAPER, caveat=CAVEAT,
+                             note="No personality indices yet — run `locus download bigfive` then `locus bigfive`.")
+    scores = [BigFiveScore(code=r[0], trait=r[1], raw=r[2], percentile=r[3], z=r[4],
+                           expected_shift_sd=(None if r[4] is None else round(r[4] * r[8], 3)),
+                           ancestry=r[5], n_used=r[6], coverage=r[7], beta=r[8]) for r in rows]
+    return BigFiveReport(scores=scores, source=PAPER, caveat=CAVEAT,
+                         note="Percentiles and z are relative to the ancestry-matched 1000 Genomes reference.")
+
+
 class WatchFinding(BaseModel):
     ts: str = Field(description="When this finding was recorded (ISO8601)")
     source: str

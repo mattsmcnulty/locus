@@ -145,6 +145,17 @@ def _risk() -> str:
         "history usually matter more.</p>")
 
 
+def _bigfive() -> str:
+    rep = queries.big_five()
+    rows = [[_e(s.trait), _e(f"{s.percentile:.0f}th" if s.percentile is not None else "raw only"),
+             _e(f"{s.z:+.2f}" if s.z is not None else "—"),
+             _e(f"{s.expected_shift_sd:+.2f} SD" if s.expected_shift_sd is not None else "—")]
+            for s in rep.scores]
+    return _table(["Trait", "Percentile", "z", "Expected trait shift"], rows,
+                  "No personality indices (run <code>locus download bigfive</code> then "
+                  "<code>locus bigfive</code>).") + f'<p class="note">{_e(rep.caveat)}</p>'
+
+
 def _traits() -> str:
     rows = [[_e(t.trait), _e(t.genotype), _e(t.interpretation)] for t in queries.traits().traits]
     return _table(["Trait", "Genotype", "Interpretation"], rows, "Run <code>locus traits</code>.")
@@ -169,6 +180,7 @@ def build(dest: Path | None = None) -> Path:
         _card("Carrier status", _carrier()),
         _card("Pharmacogenomics", _pgx()),
         _card("Polygenic risk", _risk()),
+        _card("Personality (Big Five)", _bigfive()),
         _card("Traits &amp; wellness", _traits()),
         _card("What's new", _whats_new()),
     ]

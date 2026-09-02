@@ -35,6 +35,7 @@ LICENSES = {
     "alphamissense": "CC-BY-NC 4.0",
     "gnomad": "open (gnomAD)",
     "clingen": "CC0 (ClinGen)",
+    "bigfive": "open (ReGPC PGI weights on OSF; see project page)",
 }
 
 

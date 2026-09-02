@@ -45,6 +45,7 @@ need the BAM/CRAM and are not yet implemented.)
 | **Pharmacogenomics** | **PharmCAT** star-allele diplotypes, metabolizer phenotypes, and CPIC/DPWG drug guidance |
 | **Ancestry** | Biogeographic ancestry via PCA + k-NN over 1000 Genomes + HGDP — continental and sub-continental |
 | **Polygenic risk** | PGS Catalog scores reported as an **ancestry-matched percentile** (CAD, LDL, T2D, Lp(a), …) |
+| **Personality (Big Five)** | Extraversion, agreeableness, conscientiousness, neuroticism, openness as ancestry-matched percentiles from the Nature 2026 personality GWAS's own polygenic indices — kept in its **own spot** (a behavioural tilt of ~1–4% of variance, not disease risk) with the caveat attached (`big_five`) |
 | **Carrier status** | Recessive conditions you carry one copy of (CF, PKU, Tay-Sachs, hearing loss, …) — the family-planning layer, with an explicit list of what a VCF *cannot* assess (SMN1, Fragile X) |
 | **Traits & wellness** | Single-SNP traits (lactose, caffeine, alcohol flush, earwax, eye color, muscle type), the **HLA-B\*57:01** abacavir-hypersensitivity proxy, and your **mtDNA maternal haplogroup** |
 | **GWAS breadth** | Which genome-wide-significant (p<5e-8) risk alleles you carry, across the whole GWAS Catalog, queryable by trait |
@@ -100,6 +101,7 @@ make pipeline                # ~5M variants; a few minutes
 
 # 6. Deeper interpretation (each is independent and preserved across variant reloads)
 uv run locus ancestry        # ancestry + ancestry-calibrated polygenic risk
+uv run locus bigfive         # Big Five personality indices (own spot; needs `locus download bigfive`)
 uv run locus traits          # single-SNP traits + HLA-B*57:01 proxy + mtDNA haplogroup
 uv run locus gwas            # GWAS Catalog risk alleles you carry
 
@@ -135,6 +137,7 @@ Run any command with `uv run locus <command>` (or activate the venv / add an ali
 | `locus load` | Build/refresh the DuckDB store (rebuilds variant tables; **preserves** ancestry/PGS/traits/GWAS/watch tables) |
 | `locus pipeline` | `ingest → annotate → load`, end to end |
 | `locus ancestry` | Biogeographic ancestry (PCA + k-NN over 1000G + HGDP) + ancestry-calibrated polygenic risk |
+| `locus bigfive` | Big Five personality polygenic indices (Schwaba et al. 2026), ancestry-calibrated; needs `locus download bigfive` |
 | `locus traits` | Genotype single-SNP traits/wellness + HLA-B\*57:01 proxy + mtDNA haplogroup |
 | `locus gwas` | Genotype GWAS Catalog risk alleles (p<5e-8) and store the ones you carry |
 | `locus report` | Write a self-contained HTML summary of your genome (offline, no scripts, shareable) |
@@ -166,6 +169,7 @@ echo "alias locus='uv run --directory $(pwd) locus'" >> ~/.zshrc && source ~/.zs
 | `ancestry` | PLINK2 (arm64) + 1000 Genomes + HGDP reference panels | ~6 GB |
 | `haplogrep` | Haplogrep2 jar (mtDNA haplogroups) | ~7 MB |
 | `gwas` | NHGRI-EBI GWAS Catalog associations TSV | ~65 MB |
+| `bigfive` | Big Five personality PGI weights (Schwaba 2026, OSF) + hg19→hg38 liftover chain | ~390 MB |
 
 `locus download all` fetches **everything** in the table (~9 GB, idempotent and resumable); you can
 also fetch any single target by name (e.g. `locus download ancestry`) if you only want some features.
@@ -184,6 +188,7 @@ clients dispatch them reliably):
 **Traits & breadth** — `traits`, `gwas_associations`, `ask_about` (paste rsIDs or a trait)
 **Literature** — `literature_for` (recent PubMed on a gene/rsID/topic), `variants_in_study` (which of a paper's variants you carry)
 **Interpretation** — `variant_dossier` (one call: ClinVar + AlphaMissense + gnomAD + GWAS + ClinGen + literature, weighed together), `gene_disease_validity` (ClinGen curation for a gene)
+**Personality** — `big_five` (Big Five polygenic indices — separate from polygenic risk, caveat included)
 **Living updates** — `whats_new` (the ranked changelog from `locus refresh`)
 
 **Guided workflows** (MCP prompts, pick them from Claude's prompt menu): *Annual genome review*, *Before starting a new medication*, *Family planning / carrier check*, *Explain a variant* — each one tells Claude which tools to combine and which caveats not to drop.

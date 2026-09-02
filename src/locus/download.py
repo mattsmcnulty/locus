@@ -294,6 +294,54 @@ def guidance_large() -> None:
     )
 
 
+# Big Five personality PGIs — Schwaba et al., Nature 2026 (Revived Genomics of Personality
+# Consortium). The paper's own SBayesR/HapMap3 EUR weights, public on its OSF project. GRCh37, so
+# bigfive.convert lifts them with the UCSC chain below. ~65–100 MB each; not part of the health PGS set.
+BIGFIVE_OSF = "https://doi.org/10.17605/OSF.IO/HGNSM"
+BIGFIVE_WEIGHTS = {  # trait code -> (label, OSF download URL)
+    "ext": ("Extraversion", "https://osf.io/download/6a50f005f401a9daf47afa2b/"),
+    "agr": ("Agreeableness", "https://osf.io/download/ue69g/"),
+    "con": ("Conscientiousness", "https://osf.io/download/upez8/"),
+    "neu": ("Neuroticism", "https://osf.io/download/m2xyv/"),
+    "ope": ("Openness to experience", "https://osf.io/download/6a50f004f4f89f220d3b2e5b/"),
+}
+LIFTOVER_CHAIN_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz"
+
+
+def bigfive_dir() -> Path:
+    return settings.annotations_dir / "bigfive"
+
+
+def bigfive_weights_path(code: str) -> Path:
+    return bigfive_dir() / f"ReGPC_{code}_PGI_SBayesR.txt"
+
+
+def liftover_chain_path() -> Path:
+    # Shared location: any future GRCh37-published score can reuse the chain.
+    return settings.annotations_dir / "liftover" / "hg19ToHg38.over.chain.gz"
+
+
+def setup_bigfive() -> Path:
+    """Download the Big Five PGI weights (5 files, ~390 MB) + the hg19→hg38 liftover chain (~230 KB)."""
+    d = bigfive_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    chain = liftover_chain_path()
+    if chain.exists():
+        console.print(f"[green]liftover chain present[/] → {chain}")
+    else:
+        console.print("[bold]Downloading UCSC hg19→hg38 liftover chain…[/]")
+        _curl(LIFTOVER_CHAIN_URL, chain)
+    for code, (label, url) in BIGFIVE_WEIGHTS.items():
+        dest = bigfive_weights_path(code)
+        if dest.exists():
+            console.print(f"[green]{label} weights present[/] → {dest.name}")
+            continue
+        console.print(f"[bold]Downloading {label} PGI weights (~65–100 MB)…[/]")
+        _curl(url, dest)
+    console.print(f"[green]Big Five ready[/] → {d}")
+    return d
+
+
 TARGETS = {
     "reference": download_reference,
     "clinvar": download_clinvar,
@@ -304,6 +352,7 @@ TARGETS = {
     "haplogrep": setup_haplogrep,
     "gwas": setup_gwas,
     "clingen": setup_clingen,
+    "bigfive": setup_bigfive,
 }
 
 

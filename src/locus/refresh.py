@@ -522,25 +522,48 @@ def check_litvar(man: dict) -> dict:
             "url": "https://www.ncbi.nlm.nih.gov/research/litvar2/"}
 
 
+# watch_seen_ids source key for "this rsID has been watched before" (distinct from the PMID key).
+_LITVAR_RSID_SOURCE = "litvar_rsid"
+
+
 def _litvar_findings(check: dict) -> list[Finding]:
     """New papers about the specific variants you carry (LitVar2 rsID→literature), deduped by PMID.
 
-    First run seeds the baseline silently. Mutates ``check['new_pmids']`` for mark_seen."""
+    Baselines are per-rsID, not just per-run: the watch set is "every variant ClinVar hasn't called
+    benign", so an rsID that *enters* it (a VUS label lands on a variant you've always carried) has
+    an entirely unseen back-catalog. Emitting that as "new papers" dumped 10–19 old citations at a
+    time (KMT2C, HBG2). A newly-watched rsID now seeds its PMIDs silently, exactly like the first
+    run; only papers that appear on an already-watched rsID surface. A store from before this
+    existed has PMIDs but no rsID history — those rsIDs are backfilled as watched rather than
+    silenced for a week. Mutates ``check['new_pmids']`` / ``check['new_rsids']`` for mark_seen."""
     from . import literature
 
     variants = _litvar_variants()
     check["new_pmids"] = []
+    check["new_rsids"] = []
     if not variants:
         return []
     seen = _seen_ids("litvar")
+    seen_rsids = _seen_ids(_LITVAR_RSID_SOURCE)
     first = check.get("first_run")
-    new: dict[str, tuple[str, str | None]] = {}  # pmid -> (rsid, gene)
+    legacy = not seen_rsids and bool(seen)  # ran before per-rsID baselining: treat all as watched
+    new: dict[str, tuple[str, str | None]] = {}  # pmid -> (rsid, gene) — only on watched rsIDs
+    seeded: list[str] = []                        # PMIDs on newly-watched rsIDs (silent)
+    new_rsids: list[str] = []
     for rsid, gene in variants:
+        watched = legacy or rsid in seen_rsids
+        if rsid not in seen_rsids:
+            new_rsids.append(rsid)  # newly watched, or a legacy backfill — tracked from now on
         for pmid in literature.litvar_pmids(rsid):
-            if pmid in seen or pmid in new:
+            if pmid in seen or pmid in new or pmid in seeded:
                 continue
-            new[pmid] = (rsid, gene)
-    check["new_pmids"] = list(new)
+            if watched:
+                new[pmid] = (rsid, gene)
+            else:
+                seeded.append(pmid)
+    check["new_pmids"] = list(new) + seeded
+    check["new_rsids"] = new_rsids
+    check["seeded_rsids"] = 0 if legacy else len(new_rsids)
     if first or not new:
         return []  # baseline: record the seen-set, emit nothing
     meta = literature.fetch_pubmed_meta(list(new))
@@ -711,6 +734,7 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
     pgs_new_ids: list[str] = []       # new PGS score IDs to mark seen
     pubmed_new_ids: list[str] = []    # PubMed PMIDs to mark seen (dedup)
     litvar_new_ids: list[str] = []    # LitVar PMIDs to mark seen (dedup)
+    litvar_new_rsids: list[str] = []  # rsIDs now baselined (per-variant seen-set)
     cpic_versions: dict | None = None  # per-guideline versions to persist
 
     if "clinvar" in requested:
@@ -791,7 +815,13 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
             lf = _litvar_findings(chk)
             findings += lf
             litvar_new_ids = chk.get("new_pmids", [])
-            tag = " (baseline seeded)" if chk.get("first_run") and litvar_new_ids else ""
+            litvar_new_rsids = chk.get("new_rsids", [])
+            if chk.get("first_run") and litvar_new_ids:
+                tag = " (baseline seeded)"
+            elif chk.get("seeded_rsids"):
+                tag = f" ({chk['seeded_rsids']} newly-watched variant(s) baselined silently)"
+            else:
+                tag = ""
             console.print(f"LitVar: {len(lf)} new variant-paper finding(s){tag}")
         source_updates.append(("litvar", chk["version"], chk["url"], "", True))
 
@@ -839,6 +869,7 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
         # Mark PubMed + LitVar PMIDs seen so we never re-surface the same paper.
         load.mark_seen(con, "pubmed", pubmed_new_ids)
         load.mark_seen(con, "litvar", litvar_new_ids)
+        load.mark_seen(con, _LITVAR_RSID_SOURCE, litvar_new_rsids)
     report = _write_report(findings, ts)
     if report:
         console.print(f"[green]Wrote changelog[/] → {report}")

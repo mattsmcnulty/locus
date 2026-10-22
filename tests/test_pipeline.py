@@ -1118,6 +1118,69 @@ def test_litvar_findings_dedup(genome, monkeypatch):
     assert check2["new_pmids"] == ["NEW9"]
 
 
+def test_litvar_newly_watched_rsid_seeds_silently(genome, monkeypatch):
+    """An rsID that ENTERS the watch set (a VUS label lands on a variant you always carried) has an
+    entirely unseen back-catalog. It must be seeded silently like the first run — not dumped as
+    10-19 "new papers" (the KMT2C / HBG2 floods). Papers on an already-watched rsID still surface."""
+    from locus import ingest, literature, load, refresh
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:
+        con.execute("INSERT INTO variants (chrom,pos,ref,alt,rsid,gene,clnsig) VALUES "
+                    "('chr2',47000000,'A','G','rs777','MSH2','Pathogenic'), "
+                    "('chr7',152000000,'C','T','rs888','KMT2C','Uncertain_significance')")
+        con.execute("CREATE TABLE IF NOT EXISTS watch_seen_ids(source VARCHAR, external_id VARCHAR)")
+        # rs777 was watched before (its old paper is seen); rs888 is entering the watch set now.
+        con.execute("INSERT INTO watch_seen_ids VALUES ('litvar','OLD1'), ('litvar_rsid','rs777')")
+
+    catalog = {"rs777": ["OLD1", "NEW1"], "rs888": ["BACK1", "BACK2", "BACK3"]}
+    monkeypatch.setattr(literature, "litvar_pmids", lambda rsid, **k: catalog[rsid])
+    monkeypatch.setattr(literature, "fetch_pubmed_meta", lambda pmids: {
+        p: literature.PubMedHit(pmid=p, title=f"paper {p}", abstract="x") for p in pmids})
+
+    check = {"first_run": False}
+    f = refresh._litvar_findings(check)
+    assert [(x.rsid, x.url.rsplit("/", 2)[1]) for x in f] == [("rs777", "NEW1")], \
+        "only the genuinely new paper on the already-watched variant surfaces"
+    assert check["new_rsids"] == ["rs888"]                       # now baselined
+    assert set(check["new_pmids"]) == {"NEW1", "BACK1", "BACK2", "BACK3"}  # back-catalog seeded, silently
+
+    # Next run: rs888 is watched and its catalog is seen, so a NEW paper on it surfaces.
+    with connect(read_only=False) as con:
+        load.mark_seen(con, "litvar", check["new_pmids"])
+        load.mark_seen(con, "litvar_rsid", check["new_rsids"])
+    catalog["rs888"].append("NEW2")
+    f2 = refresh._litvar_findings({"first_run": False})
+    assert [(x.rsid, x.url.rsplit("/", 2)[1]) for x in f2] == [("rs888", "NEW2")]
+
+
+def test_litvar_legacy_store_backfills_instead_of_going_silent(genome, monkeypatch):
+    """A store from before per-rsID baselining has seen PMIDs but no rsID history. Treating every
+    rsID as newly-watched would silence a whole week of real findings; backfill them instead."""
+    from locus import ingest, literature, load, refresh
+    from locus.config import settings
+    from locus.db import connect
+
+    ingest.run(settings.genome_dir, normalize=True)
+    load.run()
+    with connect(read_only=False) as con:
+        con.execute("INSERT INTO variants (chrom,pos,ref,alt,rsid,gene,clnsig) "
+                    "VALUES ('chr2',47000000,'A','G','rs777','MSH2','Pathogenic')")
+        con.execute("CREATE TABLE IF NOT EXISTS watch_seen_ids(source VARCHAR, external_id VARCHAR)")
+        con.execute("INSERT INTO watch_seen_ids VALUES ('litvar','OLD1')")   # PMIDs, no rsID rows
+
+    monkeypatch.setattr(literature, "litvar_pmids", lambda rsid, **k: ["OLD1", "NEW1"])
+    monkeypatch.setattr(literature, "fetch_pubmed_meta",
+                        lambda pmids: {"NEW1": literature.PubMedHit(pmid="NEW1", title="t", abstract="a")})
+    check = {"first_run": False}
+    f = refresh._litvar_findings(check)
+    assert [x.rsid for x in f] == ["rs777"], "legacy store keeps surfacing new papers"
+    assert check["new_rsids"] == ["rs777"], "and the rsID is backfilled so the next run tracks it"
+
+
 # ── Big Five personality PGIs (their own spot, separate from polygenic risk) ─────────
 class _FakeLifter:
     """pyliftover-shaped: 0-based in, [(chrom, 0-based pos, strand, score)] out."""

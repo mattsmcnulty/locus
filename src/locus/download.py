@@ -24,7 +24,11 @@ REFERENCE_URL = (
     "seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz"
 )
 CLINVAR_BASE = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38"
-SNPEFF_URL = "https://snpeff-public.s3.amazonaws.com/versions/snpEff_latest_core.zip"
+# Pinned (not `snpEff_latest_core.zip`) so every install annotates with the same jar. The MANE
+# database below is only published for SnpEff <= 5.2; `snpEff download` falls back to the 5.2 build,
+# which the 5.4c jar reads fine. Bump both together and re-check that fallback.
+SNPEFF_VERSION = "5.4c"
+SNPEFF_URL = f"https://snpeff-public.s3.amazonaws.com/versions/snpEff_v{SNPEFF_VERSION.replace('.', '_')}_core.zip"
 SNPEFF_DB = "GRCh38.mane.1.0.ensembl"
 
 # PharmCAT runs natively (no Docker): a Java jar + a Python preprocessor.
@@ -101,12 +105,15 @@ def setup_snpeff() -> Path:
         console.print(f"[green]SnpEff present[/] → {jar}")
     else:
         settings.annotations_dir.mkdir(parents=True, exist_ok=True)
-        zip_path = settings.annotations_dir / "snpEff_latest_core.zip"
-        console.print("[bold]Downloading SnpEff core (~50 MB)…[/]")
+        zip_path = settings.annotations_dir / "snpEff_core.zip"
+        console.print(f"[bold]Downloading SnpEff {SNPEFF_VERSION} core (~50 MB)…[/]")
         _curl(SNPEFF_URL, zip_path)
         shell.run(["unzip", "-o", "-q", str(zip_path), "-d", str(settings.annotations_dir)])
         zip_path.unlink(missing_ok=True)
-    # Download the GRCh38 database into snpEff/data.
+    # Download the GRCh38 database into snpEff/data (skip if already there — it's ~0.5 GB).
+    if (snpeff_dir / "data" / SNPEFF_DB / "snpEffectPredictor.bin").exists():
+        console.print(f"[green]SnpEff database present[/] (db {SNPEFF_DB})")
+        return jar
     if shell.resolve_java() is None:
         console.print("[yellow]No working Java found — install it with `brew install openjdk`, then re-run.[/]")
         return jar
@@ -197,6 +204,7 @@ def setup_alphamissense() -> None:
     console.print("Preparing AlphaMissense (slim + bgzip + tabix)…")
     shell.sh(f"gzip -dc {raw} | grep -v '^#' | cut -f1,2,3,4,9,10 | bgzip -@ 4 > {slim}")
     shell.run(["tabix", "-s", "1", "-b", "2", "-e", "2", str(slim)])
+    raw.unlink(missing_ok=True)  # only the slim file is used; the ~600 MB original is dead weight
     console.print(f"[green]AlphaMissense ready[/] → {slim}")
 
 

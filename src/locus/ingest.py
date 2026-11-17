@@ -15,7 +15,7 @@ from rich.console import Console
 from . import artifacts, shell
 from .config import settings
 from .shell import ToolError
-from .vcfutils import VcfInfo, chr_rename_map, detect_build, read_info, write_rename_file
+from .vcfutils import VcfInfo, canonical_chrom, chr_rename_map, detect_build, read_info, write_rename_file
 
 console = Console()
 
@@ -39,6 +39,42 @@ def qc_summary(vcf: Path) -> None:
             console.print(f"  {parts[2]:<35} {parts[3]}")
 
 
+def reference_contigs(reference: Path) -> list[str] | None:
+    """Contig names from the reference's ``.fai`` (None if it isn't indexed)."""
+    fai = reference.with_name(reference.name + ".fai")
+    if not fai.exists():
+        return None
+    return [ln.split("\t", 1)[0] for ln in fai.read_text().splitlines() if ln.strip()]
+
+
+def reference_lengths(reference: Path) -> dict[str, int]:
+    """Contig -> length from the reference's ``.fai``."""
+    fai = reference.with_name(reference.name + ".fai")
+    return {p[0]: int(p[1]) for ln in fai.read_text().splitlines() if len(p := ln.split("\t")) > 1}
+
+
+def _report_offreference(gvcf: Path, keep: set[str], *, renamed: bool) -> None:
+    """Say how many gVCF records sit on contigs the reference lacks (they are skipped)."""
+    try:
+        stats = shell.capture(["bcftools", "index", "-s", str(gvcf)])
+    except ToolError:
+        return
+    n_rec = n_ctg = 0
+    for line in stats.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[2].isdigit():
+            continue
+        name = canonical_chrom(parts[0]) if renamed else parts[0]
+        if name not in keep:
+            n_ctg += 1
+            n_rec += int(parts[2])
+    if n_ctg:
+        console.print(
+            f"[cyan]Skipping {n_rec:,} gVCF records on {n_ctg:,} contigs absent from the reference "
+            f"(alt/decoy/HLA scaffolds the GRCh38 no-alt analysis set omits).[/]"
+        )
+
+
 def gvcf_to_sites(
     gvcf: Path, reference: Path | None, dest: Path, *, normalize: bool, rename_file: Path | None = None
 ) -> Path:
@@ -50,8 +86,13 @@ def gvcf_to_sites(
 
     0. (optional) ``bcftools annotate --rename-chrs`` — canonicalize contigs to
        UCSC ``chr`` names so they match the reference / ClinVar / gnomAD.
+    0b. (with a reference) ``bcftools view -T <contigs>`` — keep only contigs the
+       reference has. Sequencing.com gVCFs carry records on ~2,000 alt/decoy/HLA
+       contigs the no-alt analysis set omits, and ``norm -f`` aborts on the first one.
     1. ``bcftools norm -m -any`` — split multiallelics; with ``-f`` also
-       left-aligns indels so positions/alleles match the annotation DBs.
+       left-aligns indels so positions/alleles match the annotation DBs. ``-c wx``
+       warns about and drops the rare record whose REF disagrees with the reference
+       (e.g. ``REF=N`` where the reference has ``A``) instead of aborting the run.
     2. ``bcftools view -e 'ALT="." || ALT="<NON_REF>"'`` — drop hom-ref block
        rows and split-off symbolic alleles, keeping only real variants.
     3. ``bcftools annotate -x INFO/END`` — strip the gVCF block-end tag.
@@ -59,7 +100,14 @@ def gvcf_to_sites(
     dest.parent.mkdir(parents=True, exist_ok=True)
     source = f"bcftools annotate --rename-chrs {rename_file} {gvcf}" if rename_file else f"bcftools view {gvcf}"
     if normalize and reference is not None:
-        norm = f"bcftools norm -f {reference} -m -any -"
+        contigs = reference_contigs(reference)
+        if contigs:
+            _report_offreference(gvcf, set(contigs), renamed=rename_file is not None)
+            targets = dest.parent / "reference_contigs.tsv"  # whole contigs, 1-based inclusive
+            lengths = reference_lengths(reference)
+            targets.write_text("".join(f"{c}\t1\t{lengths[c]}\n" for c in contigs))
+            source = f"{source} | bcftools view -T {targets}"
+        norm = f"bcftools norm -f {reference} -c wx -m -any -"
     else:
         if normalize and reference is None:
             console.print(

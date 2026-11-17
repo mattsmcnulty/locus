@@ -39,7 +39,7 @@ it does the rest:
 
 - installs the tools it needs (Homebrew, etc. — it may ask for your Mac password once, and may
   pop a "Install Command Line Tools" dialog — click Install, then double-click setup again);
-- downloads ~9 GB of reference databases (one time);
+- downloads ~22 GB of reference databases (one time);
 - builds your private genome database and runs all the interpretation;
 - registers Locus with Claude.
 

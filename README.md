@@ -93,7 +93,7 @@ make setup
 # 3. Put your sequencing.com VCFs in data/genome/, then check the environment
 make doctor
 
-# 4. Download & prepare the open-source databases (the table below; `all` fetches everything, ~9 GB)
+# 4. Download & prepare the open-source databases (the table below; `all` fetches everything, ~22 GB on disk)
 uv run locus download all
 
 # 5. Build the local genome database (ingest → annotate → load)
@@ -161,17 +161,18 @@ echo "alias locus='uv run --directory $(pwd) locus'" >> ~/.zshrc && source ~/.zs
 
 | Target | Contents | Approx size |
 | --- | --- | --- |
-| `reference` | GRCh38 no-alt analysis-set FASTA (bgzip + faidx) | ~900 MB |
-| `clinvar` | ClinVar GRCh38 VCF, chr-renamed | ~180 MB |
+| `reference` | GRCh38 no-alt analysis-set FASTA (bgzip + faidx) | ~0.8 GB |
+| `clinvar` | ClinVar GRCh38 VCF, chr-renamed | ~0.4 GB |
 | `snpeff` | SnpEff jar + GRCh38 database (consequences) | ~0.5 GB |
-| `pharmcat` | PharmCAT pipeline — native jar + Python preprocessor | ~30 MB |
-| `alphamissense` | AlphaMissense hg38 (slim, tabix-indexed) | ~640 MB |
-| `ancestry` | PLINK2 (arm64) + 1000 Genomes + HGDP reference panels | ~6 GB |
+| `pharmcat` | PharmCAT pipeline — native jar + Python preprocessor (fetches its own ~0.8 GB reference on first run) | ~0.9 GB |
+| `alphamissense` | AlphaMissense hg38 (slim, tabix-indexed; ~640 MB download) | ~0.4 GB |
+| `ancestry` | PLINK2 (arm64) + 1000 Genomes + HGDP reference panels (panels stored decompressed for PLINK) | ~19 GB |
 | `haplogrep` | Haplogrep2 jar (mtDNA haplogroups) | ~7 MB |
-| `gwas` | NHGRI-EBI GWAS Catalog associations TSV | ~65 MB |
+| `gwas` | NHGRI-EBI GWAS Catalog associations TSV | ~0.7 GB |
 | `bigfive` | Big Five personality PGI weights (Schwaba 2026, OSF) + hg19→hg38 liftover chain | ~390 MB |
 
-`locus download all` fetches **everything** in the table (~9 GB, idempotent and resumable); you can
+`locus download all` fetches **everything** in the table (~22 GB on disk, idempotent and resumable; `locus ancestry`
+then builds a further ~12 GB PCA model alongside the panels); you can
 also fetch any single target by name (e.g. `locus download ancestry`) if you only want some features.
 
 ## Querying with Claude (MCP)

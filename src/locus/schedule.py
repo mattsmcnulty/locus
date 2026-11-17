@@ -38,9 +38,8 @@ def _launchd_env() -> dict[str, str]:
     path_dirs = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin",
                  "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     env = {"PATH": ":".join(path_dirs), "LOCUS_DATA_DIR": str(settings.data_dir)}
-    java = shell.resolve_java()
-    if java:  # JAVA_HOME = <jdk>/bin/java -> <jdk>
-        env["JAVA_HOME"] = str(Path(java).resolve().parent.parent)
+    if home := shell.java_home(shell.resolve_java()):  # <jdk>/bin/java -> <jdk>; never the macOS stub
+        env["JAVA_HOME"] = home
     return env
 
 

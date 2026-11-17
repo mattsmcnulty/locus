@@ -171,6 +171,63 @@ def test_noncprefixed_bcftools_gvcf(tmp_path):
     assert not any(r.split("\t")[4] == "." for r in out)  # no hom-ref blocks left
 
 
+def test_ingest_survives_offreference_contigs_and_ref_mismatch(tmp_path):
+    """Real sequencing.com gVCFs carry ~2,000 alt/decoy contigs the no-alt reference lacks, plus the
+    odd REF=N where the reference has a base. Either used to abort `bcftools norm -f` outright."""
+    from locus import ingest
+    from locus.vcfutils import chr_rename_map, write_rename_file
+
+    seq = "ACGT" * 75  # 300 bp chr21
+    fa = tmp_path / "ref.fa"
+    fa.write_text(">chr21\n" + seq + "\n")
+    subprocess.run(["bgzip", "-f", str(fa)], check=True)
+    ref = tmp_path / "ref.fa.gz"
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = tmp_path / "S.snp-indel.genome.vcf"
+    vcf.write_text(
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=21,length=300>\n"
+        "##contig=<ID=22_KI270879v1_alt,length=1000>\n"
+        '##INFO=<ID=END,Number=1,Type=Integer,Description="">\n'
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+        f"21\t10\t.\t{seq[9]}\tT\t50\tPASS\t.\tGT\t0/1\n"        # good SNV -> kept
+        "21\t21\t.\tN\tC\t50\tPASS\t.\tGT\t0/1\n"                # REF=N, ref has A -> dropped, not fatal
+        "22_KI270879v1_alt\t500\t.\tA\tG\t50\tPASS\t.\tGT\t0/1\n"  # off-reference contig -> skipped
+    )
+    subprocess.run(["bgzip", "-f", str(vcf)], check=True)
+    gvcf = tmp_path / "S.snp-indel.genome.vcf.gz"
+    subprocess.run(["tabix", "-p", "vcf", str(gvcf)], check=True)
+    rename = write_rename_file(chr_rename_map(["21", "22_KI270879v1_alt"]), tmp_path / "rename.txt")
+
+    dest = tmp_path / "out" / "sites.vcf.gz"
+    ingest.gvcf_to_sites(gvcf, ref, dest, normalize=True, rename_file=rename)
+    rows = subprocess.run(["bcftools", "view", "-H", str(dest)], capture_output=True, text=True).stdout.splitlines()
+    assert [r.split("\t")[:2] for r in rows] == [["chr21", "10"]]
+
+
+def test_java_home_never_the_macos_stub(tmp_path):
+    """JAVA_HOME=/usr (the stub's parent.parent) makes Apple's /usr/bin/java hang — never export it."""
+    from locus import shell
+
+    assert shell.java_home("/usr/bin/java") is None
+    assert shell.java_home(None) is None
+    jdk = tmp_path / "jdk"
+    (jdk / "bin").mkdir(parents=True)
+    (jdk / "bin" / "java").write_text("")
+    assert shell.java_home(str(jdk / "bin" / "java")) == str(jdk.resolve())
+
+
+def test_java_candidates_prefer_java_home(tmp_path, monkeypatch):
+    """An explicit $JAVA_HOME (e.g. Homebrew's keg-only openjdk) beats whatever `java` is on PATH."""
+    from locus import shell
+
+    monkeypatch.setenv("JAVA_HOME", str(tmp_path / "jdk"))
+    cands = shell._java_candidates()
+    assert cands[0] == str(tmp_path / "jdk" / "bin" / "java")
+
+
 def test_structural_overlap_chr_canonicalized(genome):
     """CNV/SV ship non-chr-prefixed ('21'); the loader must canonicalize to 'chr21'
     so region queries (always chr-prefixed) can match. Regression: this silently
@@ -1068,13 +1125,15 @@ def test_doctor_flags_missing_java(genome, monkeypatch, capsys):
     ann = settings.annotations_dir
     (ann / "snpEff").mkdir(parents=True, exist_ok=True)
     (ann / "snpEff" / "snpEff.jar").write_text("")       # jar present…
-    monkeypatch.setattr(cli, "_resolve_java", lambda: None)  # …but no working Java
+    monkeypatch.setattr(cli.shell, "resolve_java", lambda: None)  # …but no working Java
+    monkeypatch.setattr(cli.shell, "java_version", lambda: None)
     cli.doctor()
     out = capsys.readouterr().out
     assert "needs java" in out, "doctor must flag a present-but-unusable Java-backed tool"
 
     # With Java working, the same row is a legitimate ok.
-    monkeypatch.setattr(cli, "_resolve_java", lambda: "/usr/bin/java")
+    monkeypatch.setattr(cli.shell, "resolve_java", lambda: "/opt/jdk/bin/java")
+    monkeypatch.setattr(cli.shell, "java_version", lambda: 'openjdk version "21"')
     cli.doctor()
     assert "needs java" not in capsys.readouterr().out
 

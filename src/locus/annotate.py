@@ -409,7 +409,8 @@ def annotate_pharmcat() -> Path | None:
     java = shell.resolve_java()
     if java:
         env["PATH"] = f"{Path(java).parent}:{env.get('PATH', '')}"
-        env["JAVA_HOME"] = str(Path(java).parent.parent)
+    if home := shell.java_home(java):  # never the macOS stub's /usr — that makes the stub hang
+        env["JAVA_HOME"] = home
     shell.run_env(
         [sys.executable, str(pipeline), str(pgx_input), "-o", str(out_dir),
          "-reporterJson", "-reporterCallsOnlyTsv"],

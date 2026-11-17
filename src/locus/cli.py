@@ -21,6 +21,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from . import shell
 from .config import settings
 
 app = typer.Typer(
@@ -42,31 +43,10 @@ console = Console()
 REQUIRED_TOOLS = ["bcftools", "samtools", "tabix", "bgzip"]
 OPTIONAL_TOOLS = ["java"]
 
-# On macOS, `which java` resolves to a stub that errors unless a JDK is installed.
-# The Homebrew openjdk is keg-only, so check its real location too.
-_JAVA_CANDIDATES = [
-    "/opt/homebrew/opt/openjdk/bin/java",
-    "/usr/local/opt/openjdk/bin/java",
-]
-
-
-def _resolve_java() -> str | None:
-    for cand in [shutil.which("java"), *_JAVA_CANDIDATES]:
-        if not cand or not Path(cand).exists():
-            continue
-        try:
-            out = subprocess.run([cand, "-version"], capture_output=True, text=True, timeout=10)
-            text = out.stderr or out.stdout
-            if "version" in text.lower() and "unable to locate" not in text.lower():
-                return text.strip().splitlines()[0]
-        except (subprocess.SubprocessError, OSError):
-            continue
-    return None
-
 
 def _tool_version(tool: str) -> str | None:
     if tool == "java":
-        return _resolve_java()
+        return shell.java_version()
     path = shutil.which(tool)
     if not path:
         return None
@@ -119,7 +99,7 @@ def doctor() -> None:
                       f"drop your sequencing.com files into {settings.genome_dir}")
 
     # Java-backed steps self-skip silently without a JDK — surface that instead of a false "ok".
-    java_ok = _resolve_java() is not None
+    java_ok = shell.resolve_java() is not None
 
     def _db_row(label: str, present: bool, hint: str, needs_java: bool = False) -> None:
         if present and needs_java and not java_ok:

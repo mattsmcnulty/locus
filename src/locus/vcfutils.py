@@ -139,3 +139,21 @@ def detect_build(info: VcfInfo) -> str:
         return "GRCh37"
     # Fall back to a chromosome length signal would require contig lengths; default to GRCh38.
     return "GRCh38?"
+
+
+def called_alleles(ref: str, alts, gt) -> list[str] | None:
+    """The alleles in a cyvcf2 genotype, one entry per copy; None for a no-call.
+
+    cyvcf2 gives ``[a, b, phased]`` for a diploid call but ``[a, phased]`` for a haploid one (male
+    X/Y outside the PARs, MT). Reading ``gt[1]`` of a haploid call returns the *phased flag* — False,
+    i.e. allele 0 — silently turning a hemizygous ALT into a "heterozygous" call and a hemizygous REF
+    into two copies. Always unpack genotypes through here.
+    """
+    if not gt:
+        return None
+    idx = list(gt[:-1]) if isinstance(gt[-1], bool) else list(gt)
+    if not idx or any(i < 0 for i in idx):
+        return None
+    alleles = [ref, *list(alts)]
+    return [alleles[i] if i < len(alleles) else "" for i in idx]
+

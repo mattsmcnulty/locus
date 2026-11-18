@@ -20,7 +20,7 @@ from rich.console import Console
 
 from . import ancestry
 from .config import settings
-from .vcfutils import canonical_chrom
+from .vcfutils import called_alleles, canonical_chrom
 
 console = Console()
 
@@ -96,11 +96,9 @@ def _risk_dosage(ref: str, alts: list[str], gt, risk: str) -> int | None:
     existed. At variant sites a non-matching risk allele is usually a different ALT of a
     multiallelic site, not a strand issue.
     """
-    a, b = gt[0], gt[1]
-    if a < 0 or b < 0:
+    called = called_alleles(ref, alts, gt)
+    if called is None:
         return None
-    alleles = [ref, *list(alts)]
-    called = [alleles[i] if 0 <= i < len(alleles) else "" for i in (a, b)]
     return sum(1 for c in called if c == risk)
 
 
@@ -246,8 +244,9 @@ def compute(assocs: list[Assoc], superpop: str | None = None) -> list[Carried]:
         d = _risk_dosage(ref, alts, gt, a.risk_allele)
         if not d:  # None (unassessable) or 0 (risk allele absent)
             continue
+        haploid = len(called_alleles(ref, alts, gt) or []) == 1   # male X/Y: one copy, hemizygous
         carried.append(Carried(a.rsid, a.chrom, a.pos, a.risk_allele, d,
-                               "homozygous" if d == 2 else "heterozygous",
+                               "hemizygous" if haploid else ("homozygous" if d == 2 else "heterozygous"),
                                a.trait, a.mapped_trait, a.pval, a.or_beta, a.pmid))
     annotate_frequencies(carried, superpop)
     return carried
@@ -313,8 +312,8 @@ def ask_markers(rsids: list[str]) -> list[dict]:
             gtstr, ref = "—", None
         else:
             ref, alts, gt = hit
-            alleles = [ref, *list(alts)]
-            gtstr = "/".join(alleles[i] if 0 <= i < len(alleles) else "." for i in gt[:2])
+            called = called_alleles(ref, alts, gt)
+            gtstr = "/".join(called) if called else "./."
         gene, clnsig, am = ann.get(rsid, (None, None, None))
         results.append({"rsid": rsid, "chrom": chrom, "pos": p, "genotype": gtstr, "ref": ref,
                         "gene": gene, "clnsig": clnsig, "am_class": am})

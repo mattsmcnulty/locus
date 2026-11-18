@@ -19,6 +19,7 @@ from rich.console import Console
 
 from . import ancestry
 from .config import settings
+from .vcfutils import called_alleles
 
 console = Console()
 
@@ -45,6 +46,8 @@ class SampleScore:
     used: dict[tuple[str, int], tuple[str, float]] = None  # type: ignore[assignment]
     # (chrom_nochr, pos) -> sample effect-allele count, so the raw score can be re-summed over a subset.
     counts: dict[tuple[str, int], int] = None  # type: ignore[assignment]
+    strand: str = "forward"           # strand_mode verdict for this scoring file
+    dropped: dict[str, int] = None    # type: ignore[assignment]  # reason -> variants not scored
 
     def raw_over(self, keys) -> float:
         """The sample's score summed over just ``keys`` (a subset of ``used``)."""
@@ -104,8 +107,12 @@ def parse_scoring_file(path: Path) -> tuple[list[ScoreVariant], dict]:
                 header = cols
                 continue
             row = dict(zip(header, cols, strict=False))
-            chrom = row.get("hm_chr") or row.get("chr_name")
-            pos = row.get("hm_pos") or row.get("chr_position")
+            if "hm_pos" in header:
+                # Harmonized file: an empty hm_pos means the variant could NOT be mapped to GRCh38.
+                # Falling back to chr_position would genotype its original (often GRCh37) coordinate.
+                chrom, pos = row.get("hm_chr"), row.get("hm_pos")
+            else:
+                chrom, pos = row.get("chr_name"), row.get("chr_position")
             ea = row.get("effect_allele")
             wt = row.get("effect_weight")
             if not (chrom and pos and ea and wt):
@@ -122,29 +129,91 @@ def parse_scoring_file(path: Path) -> tuple[list[ScoreVariant], dict]:
     return variants, meta
 
 
+def _is_palindromic(ea: str, oa: str) -> bool:
+    """A/T or C/G SNP: the opposite strand has the same two letters, so a flip is undetectable."""
+    return len(ea) == 1 and len(oa) == 1 and _COMPLEMENT.get(ea) == oa
+
+
+def _consistent(pair: set[str], ref: str, called: list[str]) -> bool:
+    """Could this site carry this allele pair? One of them is the reference base, or every called
+    allele is in the pair. (At a hom-ref site — the usual case — that means REF must be in the pair.)"""
+    return ref in pair or all(c in pair for c in called)
+
+
+def _dose(called: list[str], allele: str) -> int:
+    """Copies of ``allele``. A haploid call counts as homozygous (0 or 2) — exactly how PLINK scores the
+    reference panel's males on chrX — so the sample and the panel are on the same scale."""
+    n = sum(1 for c in called if c == allele)
+    return 2 * n if len(called) == 1 else n
+
+
+def resolve_effect(ref: str, alts: list[str], gt, ea: str, oa: str, *, allow_flip: bool = False,
+                   keep_palindromic: bool = True) -> tuple[int, str] | None:
+    """(effect-allele dosage, the effect allele as it appears on this genome's forward strand) — or
+    None when the score's alleles can't be reconciled with the site.
+
+    Both score alleles must fit the site (``_consistent``); a strand flip is considered only when
+    ``allow_flip`` (the score as a whole is strand-mixed — see ``strand_mode``) and never for a
+    palindromic SNP. With only one allele known, forward strand is assumed.
+    """
+    called = called_alleles(ref, [a for a in alts if a not in (".", "<*>", "<NON_REF>")], gt)
+    if called is None:
+        return None
+    if not oa:
+        return _dose(called, ea), ea
+    if _is_palindromic(ea, oa) and not keep_palindromic:
+        return None
+    if _consistent({ea, oa}, ref, called):
+        return _dose(called, ea), ea
+    if allow_flip and len(ea) == 1 and len(oa) == 1 and not _is_palindromic(ea, oa):
+        eaf, oaf = _COMPLEMENT.get(ea, ea), _COMPLEMENT.get(oa, oa)
+        if _consistent({eaf, oaf}, ref, called):
+            return _dose(called, eaf), eaf
+    return None
+
+
 def _effect_allele_count(ref: str, alts: list[str], gt, ea: str, oa: str) -> int | None:
-    """Count copies of the effect allele in a sample genotype, handling strand flip."""
-    a, b = gt[0], gt[1]
-    if a < 0 or b < 0:
-        return None  # no-call
-    alleles = [ref] + list(alts)
+    """Effect-allele dosage for forward-strand allele pairs (curated tag SNPs). No strand flip."""
+    r = resolve_effect(ref, alts, gt, ea, oa)
+    return r[0] if r else None
 
-    def allele(i: int) -> str:
-        return alleles[i] if 0 <= i < len(alleles) else ""
 
-    called = [allele(a), allele(b)]
-    # Direct match.
-    if ea in called or oa in called or ea == ref or oa == ref:
-        return sum(1 for c in called if c == ea)
-    # Strand flip (effect/other are on the opposite strand).
-    eaf, oaf = _COMPLEMENT.get(ea, ea), _COMPLEMENT.get(oa, oa)
-    if eaf in called or oaf in called or eaf == ref:
-        return sum(1 for c in called if c == eaf)
-    return None  # alleles don't reconcile — exclude from the score
+FORWARD_STRAND_MAX_FLIP = 0.01
+
+
+def strand_mode(variants: list[ScoreVariant], calls: dict) -> tuple[str, float]:
+    """Is this scoring file on the forward strand? Judged from its non-palindromic SNPs.
+
+    Per-variant flipping is how the GWAS ~26k false carries happened: at a hom-ref site any score
+    allele whose complement is the REF base "matches" after a flip. So decide strand once per score:
+    if (almost) no unambiguous SNP needs a flip, the file is forward-strand — flip nothing, and its
+    palindromic SNPs can be read as written. Otherwise flips are genuine and palindromic SNPs, whose
+    strand can't be told, are dropped (the standard PGS-calculator behaviour).
+    """
+    direct = flip = 0
+    for v in variants:
+        ea, oa = v.effect_allele, v.other_allele
+        if len(ea) != 1 or len(oa) != 1 or _is_palindromic(ea, oa):
+            continue
+        hit = calls.get((v.chrom, v.pos))
+        called = called_alleles(hit[0], hit[1], hit[2]) if hit else None
+        if called is None:
+            continue
+        ref = hit[0]
+        d = _consistent({ea, oa}, ref, called)
+        f = _consistent({_COMPLEMENT.get(ea, ea), _COMPLEMENT.get(oa, oa)}, ref, called)
+        if d and not f:
+            direct += 1
+        elif f and not d:
+            flip += 1
+    rate = flip / (direct + flip) if direct + flip else 0.0
+    return ("forward" if rate <= FORWARD_STRAND_MAX_FLIP else "mixed"), rate
 
 
 def score_sample(scoring_file: Path, pgs_id: str) -> SampleScore:
     """Compute the sample's raw PGS = sum(effect_allele_count × weight)."""
+    from collections import Counter
+
     variants, _ = parse_scoring_file(scoring_file)
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     bed = settings.work_dir / f"{pgs_id}.markers.bed"
@@ -153,33 +222,57 @@ def score_sample(scoring_file: Path, pgs_id: str) -> SampleScore:
     geno_vcf = settings.work_dir / f"{pgs_id}.geno.vcf.gz"
     ancestry.markers_genotypes(bed, geno_vcf)
 
-    # Index sample genotypes by (chrom, pos).
+    # Index sample genotypes by (chrom, pos). A call that failed the caller's own filters is "can't
+    # tell" — not a genotype to score.
     calls: dict[tuple[str, int], tuple] = {}
+    failed: set[tuple[str, int]] = set()
     vcf = VCF(str(geno_vcf))
     for rec in vcf:
-        calls[(rec.CHROM, rec.POS)] = (rec.REF, rec.ALT, rec.genotypes[0])
+        if rec.FILTER not in (None, "PASS"):
+            failed.add((rec.CHROM, rec.POS))
+            continue
+        alts = [a for a in rec.ALT if a not in (".", "<*>", "<NON_REF>")]
+        calls[(rec.CHROM, rec.POS)] = (rec.REF, alts, rec.genotypes[0])
     vcf.close()
 
+    mode, flip_rate = strand_mode(variants, calls)
+    allow_flip, keep_pal = mode == "mixed", mode == "forward"
     raw = 0.0
     used: dict[tuple[str, int], tuple[str, float]] = {}
     counts: dict[tuple[str, int], int] = {}
+    dropped: Counter = Counter()
     for v in variants:
-        hit = calls.get((v.chrom, v.pos))
+        key = (v.chrom, v.pos)
+        hit = calls.get(key)
         if hit is None:
+            dropped["failed filter" if key in failed else "no call"] += 1
             continue
         ref, alts, gt = hit
-        n = _effect_allele_count(ref, alts, gt, v.effect_allele, v.other_allele)
-        if n is None:
+        r = resolve_effect(ref, alts, gt, v.effect_allele, v.other_allele,
+                           allow_flip=allow_flip, keep_palindromic=keep_pal)
+        if r is None:
+            if called_alleles(ref, alts, gt) is None:
+                dropped["no call"] += 1
+            elif not keep_pal and _is_palindromic(v.effect_allele, v.other_allele):
+                dropped["palindromic (strand unknowable)"] += 1
+            else:
+                dropped["alleles don't fit the site"] += 1
             continue
+        n, allele = r
         raw += n * v.weight
-        # Key by the panel's non-chr naming; keep effect allele + weight to score the panel identically.
-        key = (v.chrom.replace("chr", ""), v.pos)
-        used[key] = (v.effect_allele, v.weight)
-        counts[key] = n
+        # Key by the panel's non-chr naming; keep the forward-strand effect allele + weight so the panel
+        # is scored on exactly the same allele.
+        pkey = (v.chrom.replace("chr", ""), v.pos)
+        used[pkey] = (allele, v.weight)
+        counts[pkey] = n
 
+    console.print(f"  {pgs_id}: {mode}-strand scoring file (flip rate {flip_rate:.2%}); used {len(used):,}/"
+                  f"{len(variants):,}" + (" — dropped " + ", ".join(f"{k} {n:,}" for k, n in dropped.items())
+                                          if dropped else ""))
     return SampleScore(
         pgs_id=pgs_id, raw=raw, n_total=len(variants), n_used=len(used),
         coverage=(len(used) / len(variants) if variants else 0.0), used=used, counts=counts,
+        strand=mode, dropped=dict(dropped),
     )
 
 
@@ -225,11 +318,11 @@ def score_reference(score: SampleScore) -> tuple[np.ndarray, set[tuple[str, int]
         "--score", str(sf), "1", "2", "3", "header-read", "cols=+scoresums", "list-variants",
         "--out", str(out),
     ])
-    # .sscore: per-sample; SCORE1_SUM column = sum(dosage*weight).
+    # .sscore: per-sample; W_SUM column = sum(dosage*weight).
     sscore = {}
     with open(str(out) + ".sscore") as fh:
         header = fh.readline().lstrip("#").rstrip("\n").split("\t")
-        col = next((i for i, h in enumerate(header) if h.endswith("SCORE1_SUM") or h == "SCORE1_SUM"), -1)
+        col = header.index("W_SUM")  # named after the score file's weight column "W"
         iid_col = header.index("IID")
         for line in fh:
             f = line.rstrip("\n").split("\t")

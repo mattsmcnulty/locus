@@ -17,6 +17,7 @@ from rich.console import Console
 from . import ancestry, panels
 from .config import settings
 from .pgs import _effect_allele_count
+from .vcfutils import called_alleles
 
 console = Console()
 
@@ -56,12 +57,8 @@ def compute() -> list[TraitResult]:
                                        "Not callable in this genome.", s.note))
             continue
         ref, alts, gt = hit
-        alleles = [ref, *list(alts)]
-
-        def _base(i: int, alleles: list = alleles) -> str:  # bind per-iteration alleles
-            return alleles[i] if 0 <= i < len(alleles) else "."
-
-        gtstr = f"{_base(gt[0])}/{_base(gt[1])}"
+        called = called_alleles(ref, [a for a in alts if a not in (".", "<*>", "<NON_REF>")], gt)
+        gtstr = "/".join(called) if called else "./."
         dosage = _effect_allele_count(ref, alts, gt, s.effect_allele, s.other_allele)
         interp = (s.interp.get(dosage, "") if dosage is not None
                   else "Genotype could not be reconciled with the expected alleles.")

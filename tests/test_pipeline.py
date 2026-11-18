@@ -1568,3 +1568,71 @@ def test_refresh_reads_full_store_despite_holdback(holdback_store):
     with holdback.bypass(), connect(read_only=True) as con:
         full = con.execute("SELECT count(*) FROM variants").fetchone()[0]
     assert (filtered, full) == (1, 4)
+
+
+def test_called_alleles_haploid_is_not_read_as_diploid():
+    """cyvcf2 haploid calls are [allele, phased]: gt[1] is the phased FLAG, not a second allele."""
+    from locus.vcfutils import called_alleles
+
+    assert called_alleles("A", ["G"], [0, 1, False]) == ["A", "G"]
+    assert called_alleles("A", ["G"], [1, False]) == ["G"]        # hemizygous ALT — not "A/G"
+    assert called_alleles("A", ["G"], [0, True]) == ["A"]         # hemizygous REF — not two copies
+    assert called_alleles("A", ["G"], [-1, -1, False]) is None
+    assert called_alleles("A", ["G"], [0, 1]) == ["A", "G"]       # no phase flag at all
+
+
+def test_risk_dosage_hemizygous():
+    from locus.gwas import _risk_dosage
+
+    assert _risk_dosage("A", ["G"], [1, False], "G") == 1
+    assert _risk_dosage("A", [], [0, False], "A") == 1           # was 2: phased flag read as allele 0
+
+
+def test_pgs_resolve_effect_never_flips_onto_reference():
+    """The GWAS false-carry bug, PGS edition: at a hom-ref site a score pair that doesn't contain REF
+    must not be 'rescued' by complementing it onto REF unless the whole score is strand-mixed."""
+    from locus.pgs import resolve_effect
+
+    g = lambda *a: [*a, False]  # noqa: E731
+    assert resolve_effect("G", [], g(0, 0), "A", "G") == (0, "A")          # forward, REF in pair
+    assert resolve_effect("G", [], g(0, 0), "G", "A") == (2, "G")
+    assert resolve_effect("G", ["A"], g(0, 1), "A", "G") == (1, "A")
+    assert resolve_effect("G", [], g(0, 0), "T", "C") is None              # pair lacks REF; flip off
+    assert resolve_effect("G", [], g(0, 0), "T", "C", allow_flip=True) == (0, "A")   # mixed file: flip
+    assert resolve_effect("G", [], g(0, 0), "A", "C") is None              # third-allele pair: no fit
+    assert resolve_effect("A", ["T"], g(0, 1), "T", "A") == (1, "T")       # palindromic, forward file
+    assert resolve_effect("A", ["T"], g(0, 1), "T", "A", keep_palindromic=False) is None
+    assert resolve_effect("A", ["G"], [1, False], "G", "A") == (2, "G")    # haploid = homozygous, like PLINK
+    assert resolve_effect("A", ["G"], g(0, 1), "G", "") == (1, "G")        # one allele known: forward
+
+
+def test_pgs_strand_mode():
+    from locus.pgs import ScoreVariant, strand_mode
+
+    calls = {("chr1", i): ("G", [], [0, 0, False]) for i in range(1, 201)}
+    fwd = [ScoreVariant("chr1", i, "A", "G", 0.1) for i in range(1, 200)] + [ScoreVariant("chr1", 200, "T", "C", 0.1)]
+    assert strand_mode(fwd, calls)[0] == "forward"                          # 1 flip in 200 = 0.5%
+    rev = [ScoreVariant("chr1", i, "T", "C", 0.1) for i in range(1, 101)] + \
+          [ScoreVariant("chr1", i, "A", "G", 0.1) for i in range(101, 201)]
+    mode, rate = strand_mode(rev, calls)
+    assert mode == "mixed" and rate == 0.5
+
+
+def test_pgs_parser_skips_unharmonized_positions(tmp_path):
+    """An empty hm_pos means 'could not map to GRCh38' — never fall back to the original coordinate."""
+    from locus.pgs import parse_scoring_file
+
+    f = tmp_path / "s.txt"
+    f.write_text("chr_name\tchr_position\teffect_allele\tother_allele\teffect_weight\thm_chr\thm_pos\n"
+                 "1\t1000\tA\tG\t0.1\t1\t2000\n"
+                 "1\t3000\tC\tT\t0.2\t\t\n")
+    vs, _ = parse_scoring_file(f)
+    assert [(v.chrom, v.pos) for v in vs] == [("chr1", 2000)]
+
+
+def test_ancestry_harmonize_no_flip_and_haploid():
+    from locus.ancestry import _gt_vs_panel
+
+    assert _gt_vs_panel("A", ["G"], [0, 1, False], "A", "G") == "0/1"
+    assert _gt_vs_panel("A", ["C"], [1, 1, False], "A", "G") == "./."   # third allele: was read as 1/1
+    assert _gt_vs_panel("A", ["G"], [1, False], "A", "G") == "1/1"      # male X, PLINK's coding

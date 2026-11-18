@@ -24,7 +24,7 @@ from rich.console import Console
 
 from . import artifacts, shell
 from .config import settings
-from .vcfutils import chr_rename_map, read_info, write_rename_file
+from .vcfutils import called_alleles, chr_rename_map, read_info, write_rename_file
 
 console = Console()
 
@@ -267,27 +267,19 @@ def pruned_sites() -> list[tuple[str, int, str, str]]:
 
 
 # ── Sample harmonization + projection ───────────────────────────────────────────
-_COMPLEMENT = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
-
-
 def _gt_vs_panel(sref: str, salts: list[str], gt, pref: str, palt: str) -> str:
-    """Sample genotype expressed against panel REF/ALT — copies of panel ALT (strand-aware)."""
-    a, b = gt[0], gt[1]
-    if a < 0 or b < 0:
+    """Sample genotype expressed against panel REF/ALT — copies of panel ALT.
+
+    No strand flip: the panel and the sample are both forward-strand GRCh38 against the same
+    reference, so a flip is never genuine — and "matching" the complement pair could read a sample
+    homozygous for a third allele as homozygous panel-ALT. A haploid call is written homozygous,
+    which is how PLINK codes the panel's males.
+    """
+    called = called_alleles(sref, [a for a in salts if a not in (".", "<*>", "<NON_REF>")], gt)
+    if called is None or not all(c in (pref, palt) for c in called):
         return "./."
-    alleles = [sref, *salts]
-    called = [alleles[i] if 0 <= i < len(alleles) else "N" for i in (a, b)]
-
-    def count(alt: str, ref: str) -> str | None:
-        if all(c in (alt, ref) for c in called):
-            return f"{sum(1 for c in called if c == alt)}"
-        return None
-
-    for pr, pa in ((pref, palt), (_COMPLEMENT.get(pref, pref), _COMPLEMENT.get(palt, palt))):
-        n = count(pa, pr)
-        if n is not None:
-            return {"0": "0/0", "1": "0/1", "2": "1/1"}[n]
-    return "./."
+    n = sum(1 for c in called if c == palt) * (2 if len(called) == 1 else 1)
+    return {0: "0/0", 1: "0/1", 2: "1/1"}[n]
 
 
 def harmonize_sample(dest: Path) -> Path:

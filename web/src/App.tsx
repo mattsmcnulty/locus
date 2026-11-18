@@ -20,6 +20,12 @@ import {
 } from "./api";
 
 type Tab = "search" | "clinical" | "pgx" | "ancestry" | "risk" | "traits" | "gwas" | "changelog" | "sql";
+const TABS: Tab[] = ["search", "clinical", "pgx", "ancestry", "risk", "traits", "gwas", "changelog", "sql"];
+// The tab lives in the URL hash (#gwas) so it survives a reload and can be linked to.
+const tabFromHash = (): Tab => {
+  const h = window.location.hash.slice(1) as Tab;
+  return TABS.includes(h) ? h : "search";
+};
 
 // Continental colors for the ancestry PCA cloud.
 const SUPERPOP_COLORS: Record<string, string> = {
@@ -62,7 +68,16 @@ const POP_COORDS: Record<string, { lng: number; lat: number; group: string }> = 
 export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("search");
+  const [tab, setTabState] = useState<Tab>(tabFromHash);
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    window.history.replaceState(null, "", `#${t}`);
+  };
+  useEffect(() => {
+    const onHash = () => setTabState(tabFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   useEffect(() => {
     api.overview().then(setOverview).catch((e) => setErr(String(e.message ?? e)));
@@ -81,7 +96,7 @@ export function App() {
       {overview && <OverviewBar o={overview} />}
 
       <nav className="tabs">
-        {(["search", "clinical", "pgx", "ancestry", "risk", "traits", "gwas", "changelog", "sql"] as Tab[]).map((t) => (
+        {TABS.map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
             {t === "pgx" ? "Pharmacogenomics" : t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -442,11 +457,11 @@ function GwasView() {
   }, []);
   return (
     <section>
-      <div className="search-row">
+      <div className="searchbar">
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="trait, e.g. height, asthma… (blank = all)"
           onKeyDown={(e) => e.key === "Enter" && search()} />
         <button onClick={() => search()}>Search</button>
-        <label>
+        <label className="check">
           <input type="checkbox" checked={rareOnly}
             onChange={(e) => { setRareOnly(e.target.checked); search(e.target.checked); }} />
           {" "}Less common only, rarest first

@@ -20,7 +20,8 @@ from .config import settings
 # v3: traits + associations tables; ancestry_pca gained a `group` (continent) column.
 # v4: watch_findings gained a `url` column (clickable citations for PubMed/GWAS findings).
 # v5: personality_pgi table (Big Five PGIs — its own spot, separate from pgs_scores).
-SCHEMA_VERSION = 5
+# v6: associations gained risk_af / carrier_freq / af_source (rarity ranking of carried GWAS hits).
+SCHEMA_VERSION = 6
 
 
 @contextmanager

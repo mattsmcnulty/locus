@@ -232,15 +232,22 @@ def big_five() -> queries.BigFiveReport:
 
 
 @mcp.tool()
-def gwas_associations(trait: str = "", limit: int = 100) -> queries.AssociationPage:
+def gwas_associations(trait: str = "", limit: int = 100, sort: str = "rarity",
+                      max_carrier_freq: float = queries.DEFAULT_MAX_CARRIER_FREQ) -> queries.AssociationPage:
     """GWAS Catalog risk alleles THIS genome carries (genome-wide significant, p<5e-8), optionally
     filtered by `trait` substring (e.g. 'type 2 diabetes', 'height'). WEAK / EXPLORATORY: single hits
     with tiny effects — do NOT sum them or read them like a calibrated score (use polygenic_risk for
-    that). Ordered by significance. Requires `locus gwas` to have run."""
+    that). Requires `locus gwas` to have run.
+
+    Default: only risk alleles carried by <= half of people of the person's ancestry (`carrier_freq`),
+    rarest first — most people carry about half of all common risk alleles, so the full list is close
+    to "everything". `max_carrier_freq=1` shows all; `sort="significance"` orders by p-value. Rare is
+    distinctive, not necessarily important: weigh the p-value too."""
     err = _require_db()
     if err:
         return queries.AssociationPage(total=0, limit=limit, offset=0, hits=[])
-    return queries.gwas_associations(trait=trait or None, limit=limit)
+    return queries.gwas_associations(trait=trait or None, limit=limit, sort=sort,
+                                     max_carrier_freq=max_carrier_freq)
 
 
 @mcp.tool()

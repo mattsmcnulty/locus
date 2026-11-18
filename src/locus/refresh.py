@@ -383,7 +383,9 @@ def _reanalyze_gwas() -> list[Finding]:
     (settings.annotations_dir / "gwas" / "gwas-catalog-associations.tsv").unlink(missing_ok=True)
     tsv = download.setup_gwas()
     console.print("Re-parsing GWAS Catalog (p < 5e-8 lead SNPs) + re-genotyping carried alleles…")
-    carried = gwas.compute(gwas.parse(tsv))
+    from . import ancestry
+
+    carried = gwas.compute(gwas.parse(tsv), ancestry.stored_superpop())
     load.write_associations(carried)
     cur = _snapshot_gwas()
     if not prev:  # first time associations exist — record the baseline, don't flood
@@ -731,6 +733,15 @@ def _write_report(findings: list[Finding], ts: str) -> Path | None:
 
 
 def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> list[Finding]:
+    """Check sources and re-interpret. Reads the FULL store (held-back topics included) so watching
+    and diffing never develop gaps; only the printed digest and the report file are filtered."""
+    from . import holdback
+
+    with holdback.bypass():
+        return _run(sources, dry_run=dry_run, force=force)
+
+
+def _run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> list[Finding]:
     """Check each source, re-interpret what changed, and persist ranked findings.
 
     sources: subset of {clinvar, pgs, cpic, gwas, pubmed, litvar, clingen} or "all".

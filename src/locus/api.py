@@ -120,9 +120,14 @@ def traits(category: str = ""):
 
 
 @app.get("/api/gwas")
-def gwas(trait: str = "", limit: int = 100, offset: int = 0):
+def gwas(trait: str = "", limit: int = 100, offset: int = 0, sort: str = "rarity",
+         max_carrier_freq: float = queries.DEFAULT_MAX_CARRIER_FREQ):
     _guard_db()
-    return queries.gwas_associations(trait=trait or None, limit=limit, offset=offset)
+    try:
+        return queries.gwas_associations(trait=trait or None, limit=limit, offset=offset, sort=sort,
+                                         max_carrier_freq=max_carrier_freq)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 class SqlBody(BaseModel):

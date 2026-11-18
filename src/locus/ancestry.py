@@ -90,6 +90,20 @@ def _panel() -> tuple[Path, Path, Path]:
     return pgen, pvar, psam
 
 
+def stored_superpop() -> str | None:
+    """The nearest continental ancestry `locus ancestry` recorded for this genome (None if not run)."""
+    from .db import connect, db_exists
+
+    if not db_exists():
+        return None
+    try:
+        with connect(read_only=True) as con:
+            row = con.execute('SELECT "group" FROM ancestry_pca WHERE is_sample LIMIT 1').fetchone()
+        return row[0] if row else None
+    except Exception:  # noqa: BLE001 - table absent = ancestry not run
+        return None
+
+
 # ── Shared primitive ────────────────────────────────────────────────────────────
 def markers_genotypes(regions_bed: Path, dest: Path) -> Path:
     """Sample genotypes (incl. hom-ref 0/0) at the chr-prefixed positions in ``regions_bed``."""

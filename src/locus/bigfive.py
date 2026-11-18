@@ -30,7 +30,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import download, pgs, shell
+from . import ancestry, download, pgs, shell
 
 console = Console()
 
@@ -145,20 +145,6 @@ def convert(code: str, *, force: bool = False) -> Path:
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────────
-def stored_superpop() -> str | None:
-    """The nearest continental ancestry `locus ancestry` recorded for this genome (None if not run)."""
-    from .db import connect, db_exists
-
-    if not db_exists():
-        return None
-    try:
-        with connect(read_only=True) as con:
-            row = con.execute('SELECT "group" FROM ancestry_pca WHERE is_sample LIMIT 1').fetchone()
-        return row[0] if row else None
-    except Exception:  # noqa: BLE001 - table absent = ancestry not run
-        return None
-
-
 def weights_present() -> bool:
     return download.liftover_chain_path().exists() and all(
         download.bigfive_weights_path(c).exists() for c in download.BIGFIVE_WEIGHTS)
@@ -170,7 +156,7 @@ def run(nearest_superpop: str | None = None) -> list[BigFiveScore]:
     if not weights_present():
         console.print("[yellow]Big Five weights not found — run `locus download bigfive` first. Skipping.[/]")
         return []
-    superpop = nearest_superpop or stored_superpop()
+    superpop = nearest_superpop or ancestry.stored_superpop()
     if superpop is None:
         console.print("[yellow]No ancestry on record (run `locus ancestry`) — reporting raw scores only.[/]")
     results: list[BigFiveScore] = []

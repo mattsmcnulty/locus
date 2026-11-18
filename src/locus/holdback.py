@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -301,8 +302,29 @@ def _held_predicates(spec: HoldbackSpec) -> dict[str, str]:
     }
 
 
+_BYPASS = False
+
+
+@contextmanager
+def bypass():
+    """Pipeline-internal reads (the weekly refresh, frequency lookups) see the FULL store.
+
+    Without this, refresh would stop watching held-back genes and diff a filtered snapshot — so
+    removing a holdback later would reveal a gap instead of everything. What refresh *prints and
+    writes to the report* is still filtered (``refresh._shown``).
+    """
+    global _BYPASS
+    prev, _BYPASS = _BYPASS, True
+    try:
+        yield
+    finally:
+        _BYPASS = prev
+
+
 def install_views(con, spec: HoldbackSpec | None = None) -> None:
     """Shadow each user-facing table with a TEMP view that drops held rows (read-only connections)."""
+    if _BYPASS:
+        return
     spec = load() if spec is None else spec
     if not spec:
         return

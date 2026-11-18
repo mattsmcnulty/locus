@@ -459,8 +459,8 @@ def test_gwas_parse_filters(tmp_path):
 
 
 def test_risk_dosage():
-    """Risk-allele dosage: hom-ref-at-non-risk is 0 (not excluded); strand flip handled;
-    risk allele absent from site -> None."""
+    """Risk-allele dosage: hom-ref-at-non-risk is 0 (not excluded); NO strand flip (the catalog is
+    forward-strand; flipping turned hom-ref G/G into two copies of a risk C); no-call -> None."""
     from locus.gwas import _risk_dosage
 
     g = lambda a, b: [a, b, False]  # noqa: E731 - cyvcf2-style genotype
@@ -468,8 +468,9 @@ def test_risk_dosage():
     assert _risk_dosage("A", ["G"], g(0, 1), "G") == 1    # het
     assert _risk_dosage("A", ["G"], g(1, 1), "G") == 2    # hom-alt
     assert _risk_dosage("A", ["G"], g(0, 0), "A") == 2    # hom-ref, risk == ref
-    assert _risk_dosage("A", ["G"], g(0, 1), "C") == 1    # strand flip C->G
-    assert _risk_dosage("A", ["T"], g(0, 1), "C") is None  # risk neither at site nor its complement
+    assert _risk_dosage("A", ["G"], g(0, 1), "C") == 0    # C isn't at the site: not carried (no flip)
+    assert _risk_dosage("G", [], g(0, 0), "C") == 0       # hom-ref block (ALT "."): complement == REF, still 0
+    assert _risk_dosage("G", [], g(0, 0), "G") == 2       # hom-ref block, risk == REF
     assert _risk_dosage("A", ["G"], g(-1, -1), "G") is None  # no-call
 
 
@@ -1455,7 +1456,7 @@ def test_holdback_hides_everywhere_and_comes_back(holdback_store):
     assert queries.lookup_by_gene("GENE1").total == 0
     assert queries.lookup_by_gene("CFTR").total == 1          # unrelated rows untouched
     # rs7412 is hidden even under an innocuous trait: its genotype would reveal APOE status.
-    traits = {h.trait for h in queries.gwas_associations().hits}
+    traits = {h.trait for h in queries.gwas_associations(max_carrier_freq=None).hits}
     assert traits == {"Height"}
     assert "held back" in queries.gwas_associations(trait="alzheimer").note
     # Raw SQL sees the same filtered store and can't step around it.
@@ -1494,3 +1495,76 @@ def test_holdback_custom_topic_validation(holdback_store):
         holdback.add_custom("bad", genes=["APOE'; DROP TABLE variants; --"])
     with pytest.raises(ValueError):
         holdback.add_custom("empty")
+
+
+def test_risk_allele_freq_matching():
+    """Risk-allele frequency from split biallelic panel records — never a guess on a mismatch."""
+    from locus.gwas import risk_allele_freq
+
+    assert risk_allele_freq([("A", "G", 0.2)], "G") == 0.2                    # risk = ALT
+    assert risk_allele_freq([("A", "G", 0.2)], "A") == pytest.approx(0.8)     # risk = REF
+    assert risk_allele_freq([("A", "G", 0.2), ("A", "T", 0.1)], "A") == pytest.approx(0.7)  # multiallelic REF
+    assert risk_allele_freq([("A", "G", 0.2), ("A", "T", 0.1)], "T") == 0.1
+    assert risk_allele_freq([("A", "C", 0.3)], "G") is None                   # not in the panel: unknown, no flip
+    assert risk_allele_freq([], "A") is None
+
+
+def test_annotate_frequencies_panel_and_fallback(monkeypatch):
+    from locus import gwas
+
+    def mk(rsid, pos, risk):
+        return gwas.Carried(rsid, "chr1", pos, risk, 1, "heterozygous", "T", "t", 1e-9, "1.1", "1")
+
+    carried = [mk("rs1", 10, "G"), mk("rs2", 20, "T")]
+    monkeypatch.setattr(gwas, "panel_allele_freqs", lambda pos, sp: {("chr1", 10): [("A", "G", 0.1)]})
+    assert gwas.annotate_frequencies(carried, "EUR") == "1000 Genomes EUR"
+    assert carried[0].risk_af == 0.1 and carried[0].carrier_freq == pytest.approx(0.19)  # 1-(0.9)^2
+    assert carried[1].carrier_freq is None                                              # not in panel
+
+    def no_panel(pos, sp):
+        raise FileNotFoundError
+    carried = [mk("rs1", 10, "G")]
+    monkeypatch.setattr(gwas, "panel_allele_freqs", no_panel)
+    monkeypatch.setattr(gwas, "_gnomad_freqs", lambda c: {("chr1", 10, "G"): 0.05})
+    assert gwas.annotate_frequencies(carried, "EUR") == "gnomAD (global)"
+    assert carried[0].risk_af == 0.05
+
+
+def test_gwas_rarity_ranking_and_cap(tmp_path):
+    """Default view: carried by <= half of people, rarest first; the note counts what it left out."""
+    from locus import gwas, load, queries
+    from locus.config import settings
+
+    settings.data_dir = tmp_path / "data"
+    settings.db_path = settings.data_dir / "locus.duckdb"
+    settings.data_dir.mkdir(parents=True)
+
+    def mk(rsid, cf, p):
+        return gwas.Carried(rsid, "chr1", int(rsid[2:]), "A", 1, "heterozygous", f"trait {rsid}", "t", p, "1.1",
+                            "1", risk_af=None if cf is None else 1 - (1 - cf) ** 0.5, carrier_freq=cf,
+                            af_source=None if cf is None else "1000 Genomes EUR")
+
+    load.write_associations([mk("rs1", 0.9, 1e-50), mk("rs2", 0.04, 1e-9), mk("rs3", 0.3, 1e-12),
+                             mk("rs4", None, 1e-30)])
+    page = queries.gwas_associations()
+    assert [h.rsid for h in page.hits] == ["rs2", "rs3"]           # rarest first, common + unknown dropped
+    assert "1 more-common and 1 unknown-frequency" in page.note and "1000 Genomes EUR" in page.note
+    allp = queries.gwas_associations(max_carrier_freq=None, sort="significance")
+    assert [h.rsid for h in allp.hits] == ["rs1", "rs4", "rs3", "rs2"]
+    assert [h.rsid for h in queries.gwas_associations(max_carrier_freq=1).hits][-1] == "rs4"  # unknown last
+    assert [h.rsid for h in queries.gwas_associations(rsid="rs1", max_carrier_freq=None).hits] == ["rs1"]
+    with pytest.raises(ValueError):
+        queries.gwas_associations(sort="bogus")
+
+
+def test_refresh_reads_full_store_despite_holdback(holdback_store):
+    """Refresh must keep watching held genes (else un-holding reveals a gap): reads bypass the views."""
+    from locus import holdback
+    from locus.db import connect
+
+    holdback.add_preset("alzheimers")
+    with connect(read_only=True) as con:
+        filtered = con.execute("SELECT count(*) FROM variants").fetchone()[0]
+    with holdback.bypass(), connect(read_only=True) as con:
+        full = con.execute("SELECT count(*) FROM variants").fetchone()[0]
+    assert (filtered, full) == (1, 4)

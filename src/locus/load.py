@@ -220,7 +220,9 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE IF NOT EXISTS associations(
             rsid VARCHAR, chrom VARCHAR, pos BIGINT, risk_allele VARCHAR, dosage INTEGER,
             zygosity VARCHAR, trait VARCHAR, mapped_trait VARCHAR, pval DOUBLE,
-            or_beta VARCHAR, pmid VARCHAR
+            or_beta VARCHAR, pmid VARCHAR,
+            -- how common the risk allele is in the matched ancestry (for rarity ranking)
+            risk_af DOUBLE, carrier_freq DOUBLE, af_source VARCHAR
         );
     """)
 
@@ -350,9 +352,11 @@ def write_associations(carried: list) -> None:
         con.execute("DROP TABLE IF EXISTS associations")
         _create_schema(con)
         con.executemany(
-            "INSERT INTO associations VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO associations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [(c.rsid, c.chrom, c.pos, c.risk_allele, c.dosage, c.zygosity, c.trait,
-              c.mapped_trait, c.pval, c.or_beta, c.pmid) for c in carried],
+              c.mapped_trait, c.pval, c.or_beta, c.pmid,
+              getattr(c, "risk_af", None), getattr(c, "carrier_freq", None), getattr(c, "af_source", None))
+             for c in carried],
         )
     finally:
         con.close()

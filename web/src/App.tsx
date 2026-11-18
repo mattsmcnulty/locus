@@ -433,26 +433,35 @@ function RiskView() {
 }
 
 function GwasView() {
-  const [q, setQ] = useState("type 2 diabetes");
+  const [q, setQ] = useState("");
+  const [rareOnly, setRareOnly] = useState(true);
   const { data, loading, error, run } = useAsync<AssociationPage>();
+  const search = (rare = rareOnly) => run(() => api.gwas(q, rare));
   useEffect(() => {
-    run(() => api.gwas(q));
+    search();
   }, []);
   return (
     <section>
       <div className="search-row">
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="trait, e.g. height, asthma…"
-          onKeyDown={(e) => e.key === "Enter" && run(() => api.gwas(q))} />
-        <button onClick={() => run(() => api.gwas(q))}>Search</button>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="trait, e.g. height, asthma… (blank = all)"
+          onKeyDown={(e) => e.key === "Enter" && search()} />
+        <button onClick={() => search()}>Search</button>
+        <label>
+          <input type="checkbox" checked={rareOnly}
+            onChange={(e) => { setRareOnly(e.target.checked); search(e.target.checked); }} />
+          {" "}Less common only, rarest first
+        </label>
       </div>
       {loading && <p>Loading…</p>}
       {error && <div className="banner error">{error}</div>}
       {data && (
         <>
-          <p className="hint">{data.total.toLocaleString()} carried risk allele(s) for "{data.trait}". {data.note}</p>
+          <p className="hint">
+            {data.total.toLocaleString()} carried risk allele(s){data.trait ? ` for "${data.trait}"` : ""}. {data.note}
+          </p>
           <table>
             <thead>
-              <tr><th>rsID</th><th>Risk</th><th>Zygosity</th><th>Trait</th><th>OR/β</th><th>P</th></tr>
+              <tr><th>rsID</th><th>Risk</th><th>Zygosity</th><th>Trait</th><th>Carried by</th><th>OR/β</th><th>P</th></tr>
             </thead>
             <tbody>
               {data.hits.map((a, i) => (
@@ -461,6 +470,11 @@ function GwasView() {
                   <td className="mono">{a.risk_allele}</td>
                   <td>{a.zygosity}</td>
                   <td>{a.mapped_trait}</td>
+                  <td className="mono" title={a.af_source ?? "frequency unknown"}>
+                    {a.carrier_freq == null ? "—"
+                      : a.carrier_freq === 0 ? "not seen"
+                      : `${(a.carrier_freq * 100).toFixed(a.carrier_freq < 0.01 ? 1 : 0)}%`}
+                  </td>
                   <td className="mono">{a.or_beta ?? ""}</td>
                   <td className="mono">{a.pval.toExponential(0)}</td>
                 </tr>

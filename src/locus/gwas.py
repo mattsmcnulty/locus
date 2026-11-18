@@ -20,7 +20,6 @@ from rich.console import Console
 
 from . import ancestry
 from .config import settings
-from .pgs import _COMPLEMENT
 from .vcfutils import canonical_chrom
 
 console = Console()
@@ -87,22 +86,22 @@ def parse(tsv: Path, pmax: float = GENOME_WIDE_SIG) -> list[Assoc]:
 
 
 def _risk_dosage(ref: str, alts: list[str], gt, risk: str) -> int | None:
-    """Copies of the risk allele (0/1/2). Unlike pgs._effect_allele_count this returns 0
-    (not None) when the person is hom-ref and the risk allele simply isn't present —
-    'carries zero risk alleles' is a real answer. Returns None only when the risk allele
-    isn't represented at the site at all (can't assess)."""
+    """Copies of the risk allele (0/1/2); None only for a no-call.
+
+    The GWAS Catalog reports GRCh38 risk alleles on the forward strand, so a risk allele that isn't
+    at the site simply isn't carried (0). There is deliberately NO strand-flip fallback: at a
+    hom-ref site the only allele present is REF, and "flipping" a risk allele whose complement
+    happens to be REF (risk C, REF G) counted a plain G/G as two risk copies — ~26k false "carried"
+    associations, which surfaced as impossible 0%-frequency homozygous hits once rarity ranking
+    existed. At variant sites a non-matching risk allele is usually a different ALT of a
+    multiallelic site, not a strand issue.
+    """
     a, b = gt[0], gt[1]
     if a < 0 or b < 0:
         return None
     alleles = [ref, *list(alts)]
     called = [alleles[i] if 0 <= i < len(alleles) else "" for i in (a, b)]
-    site = set(alleles)
-    if risk in site:
-        return sum(1 for c in called if c == risk)
-    flip = _COMPLEMENT.get(risk, risk)
-    if flip in site:
-        return sum(1 for c in called if c == flip)
-    return None  # risk allele not at this site (e.g. multiallelic mismatch) — exclude
+    return sum(1 for c in called if c == risk)
 
 
 @dataclass
@@ -118,9 +117,107 @@ class Carried:
     pval: float
     or_beta: str
     pmid: str
+    # How common the risk allele is in people of this genome's ancestry (None = unknown). Lets the
+    # carried list be ranked by rarity: ~half of all common risk alleles are carried by anyone.
+    risk_af: float | None = None         # risk-allele frequency
+    carrier_freq: float | None = None    # share of people carrying >=1 copy: 1-(1-p)^2 (Hardy-Weinberg)
+    af_source: str | None = None         # e.g. "1000 Genomes EUR"
 
 
-def compute(assocs: list[Assoc]) -> list[Carried]:
+def risk_allele_freq(records: list[tuple[str, str, float]], risk: str) -> float | None:
+    """Frequency of ``risk`` from a site's biallelic panel records ``(ref, alt, alt_freq)``.
+
+    Multiallelic sites arrive split (A>G, A>T): an ALT's frequency is its own; the REF's is
+    1 − Σ ALT freqs. Forward strand only, like ``_risk_dosage``. Returns None when the risk allele
+    is neither REF nor an ALT in the panel — never a guess.
+    """
+    for _ref, alt, f in records:
+        if alt == risk:
+            return f
+    if any(ref == risk for ref, _alt, _f in records):
+        return max(0.0, 1.0 - sum(f for ref, _alt, f in records if ref == risk))
+    return None
+
+
+def panel_allele_freqs(positions: list[tuple[str, int]], superpop: str | None
+                       ) -> dict[tuple[str, int], list[tuple[str, str, float]]]:
+    """Allele frequencies at ``positions`` in the local 1000 Genomes panel (one PLINK2 pass).
+
+    Restricted to the matched superpopulation when known. Raises FileNotFoundError without the panel.
+    """
+    from . import pgs, shell
+
+    pgen, pvar, psam = ancestry._panel()
+    wd = settings.work_dir
+    wd.mkdir(parents=True, exist_ok=True)
+    bed = wd / "gwas.freq.bed"
+    bed.write_text("".join(f"{c.removeprefix('chr')}\t{p - 1}\t{p}\n" for c, p in positions))
+    out = wd / "gwas.panelfreq"
+    cmd = [str(ancestry.plink2()), "--pgen", str(pgen), "--pvar", str(pvar), "--psam", str(psam),
+           "--extract", "bed1", str(bed), "--snps-only", "--max-alleles", "2",
+           "--set-all-var-ids", "@:#:$r:$a", "--freq", "--out", str(out)]
+    if superpop:
+        iids, sp = pgs._ref_labels()
+        keep = wd / "gwas.keep"
+        keep.write_text("".join(f"{i}\n" for i in iids if sp.get(i) == superpop))
+        cmd[-2:-2] = ["--keep", str(keep)]
+    shell.run(cmd, quiet=True)
+
+    freqs: dict[tuple[str, int], list[tuple[str, str, float]]] = {}
+    with open(str(out) + ".afreq") as fh:
+        header = fh.readline().lstrip("#").rstrip("\n").split("\t")
+        id_i, ref_i, alt_i, f_i = (header.index(k) for k in ("ID", "REF", "ALT", "ALT_FREQS"))
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            chrom, pos = f[id_i].split(":")[:2]
+            try:
+                freqs.setdefault((canonical_chrom(chrom), int(pos)), []).append(
+                    (f[ref_i].upper(), f[alt_i].upper(), float(f[f_i])))
+            except ValueError:
+                continue
+    return freqs
+
+
+def _gnomad_freqs(carried: list[Carried]) -> dict[tuple[str, int, str], float]:
+    """Fallback without the 1000G panel: gnomAD AF from the store, where the risk allele is the ALT."""
+    from . import holdback
+    from .db import connect, db_exists
+
+    if not db_exists():
+        return {}
+    with holdback.bypass(), connect(read_only=True) as con:
+        rows = con.execute("SELECT chrom, pos, alt, gnomad_af FROM variants WHERE gnomad_af IS NOT NULL "
+                           "AND (chrom, pos) IN (SELECT * FROM (VALUES " +
+                           ", ".join(f"('{c}', {p})" for c, p in sorted({(x.chrom, x.pos) for x in carried}))
+                           + "))").fetchall() if carried else []
+    return {(c, p, a): f for c, p, a, f in rows}
+
+
+def annotate_frequencies(carried: list[Carried], superpop: str | None) -> str | None:
+    """Fill ``risk_af`` / ``carrier_freq`` / ``af_source`` in place. Returns the source used."""
+    if not carried:
+        return None
+    try:
+        freqs = panel_allele_freqs(sorted({(c.chrom, c.pos) for c in carried}), superpop)
+        source = f"1000 Genomes {superpop}" if superpop else "1000 Genomes (all populations)"
+        lookup = lambda c: risk_allele_freq(freqs.get((c.chrom, c.pos), []), c.risk_allele)  # noqa: E731
+    except FileNotFoundError:
+        console.print("[yellow]No 1000 Genomes panel (`locus download ancestry`) — falling back to gnomAD "
+                      "frequencies where the store has them; the rest stay unranked.[/]")
+        gn = _gnomad_freqs(carried)
+        source = "gnomAD (global)"
+        lookup = lambda c: gn.get((c.chrom, c.pos, c.risk_allele))  # noqa: E731
+    n = 0
+    for c in carried:
+        p = lookup(c)
+        if p is not None:
+            c.risk_af, c.carrier_freq, c.af_source = round(p, 4), round(1 - (1 - p) ** 2, 4), source
+            n += 1
+    console.print(f"Risk-allele frequency ({source}) known for {n:,}/{len(carried):,} carried associations.")
+    return source
+
+
+def compute(assocs: list[Assoc], superpop: str | None = None) -> list[Carried]:
     """Genotype the lead SNPs once and keep associations whose risk allele is carried."""
     positions = sorted({(a.chrom, a.pos) for a in assocs})
     settings.work_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +230,10 @@ def compute(assocs: list[Assoc]) -> list[Carried]:
     calls: dict[tuple[str, int], tuple] = {}
     vcf = VCF(str(geno))
     for rec in vcf:
+        # A call that failed the caller's own filters (e.g. a low-depth SNV shadowing a real indel) is
+        # "can't tell", not a carried allele — such artifacts otherwise top the rarest-first view.
+        if rec.FILTER not in (None, "PASS"):
+            continue
         calls[(rec.CHROM, rec.POS)] = (rec.REF, rec.ALT, rec.genotypes[0])
     vcf.close()
 
@@ -148,6 +249,7 @@ def compute(assocs: list[Assoc]) -> list[Carried]:
         carried.append(Carried(a.rsid, a.chrom, a.pos, a.risk_allele, d,
                                "homozygous" if d == 2 else "heterozygous",
                                a.trait, a.mapped_trait, a.pval, a.or_beta, a.pmid))
+    annotate_frequencies(carried, superpop)
     return carried
 
 
@@ -227,7 +329,7 @@ def run() -> list[Carried]:
     console.print("Parsing GWAS Catalog (p < 5e-8 lead SNPs)…")
     assocs = parse(tsv)
     console.print(f"{len(assocs):,} genome-wide-significant lead associations after dedup.")
-    carried = compute(assocs)
+    carried = compute(assocs, ancestry.stored_superpop())
     load.write_associations(carried)
     n_snps = len({c.rsid for c in carried})
     console.print(f"[green]Carried[/] {len(carried):,} associations across {n_snps:,} risk SNPs "

@@ -139,6 +139,9 @@ export interface Association {
   pval: number;
   or_beta: string | null;
   pmid: string | null;
+  risk_af: number | null;
+  carrier_freq: number | null;
+  af_source: string | null;
 }
 export interface AssociationPage {
   total: number;
@@ -169,7 +172,11 @@ export const api = {
   whatsNew: () => get<WhatsNew>("/api/whats_new"),
   traits: () => get<TraitsReport>("/api/traits"),
   secondaryFindings: () => get<VariantPage>("/api/secondary_findings"),
-  gwas: (trait: string) => get<AssociationPage>(`/api/gwas?trait=${encodeURIComponent(trait)}&limit=100`),
+  gwas: (trait: string, rareOnly = true) =>
+    get<AssociationPage>(
+      `/api/gwas?trait=${encodeURIComponent(trait)}&limit=100` +
+        (rareOnly ? "" : "&sort=significance&max_carrier_freq=1"),
+    ),
   sql: async (query: string): Promise<SqlResult> => {
     const r = await fetch("/api/sql", {
       method: "POST",

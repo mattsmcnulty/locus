@@ -647,6 +647,12 @@ class Association(BaseModel):
     pval: float
     or_beta: str | None = None
     pmid: str | None = None
+    risk_af: float | None = Field(default=None, description="Risk-allele frequency in the matched ancestry")
+    carrier_freq: float | None = Field(
+        default=None, description="Share of people (matched ancestry) carrying >=1 copy — lower = more distinctive. "
+                                  "0 = not seen in the reference panel (~500 people per ancestry): rarer than it can "
+                                  "measure, not literally zero")
+    af_source: str | None = Field(default=None, description="Where the frequency comes from, e.g. 1000 Genomes EUR")
 
 
 class AssociationPage(BaseModel):
@@ -662,34 +668,84 @@ class AssociationPage(BaseModel):
     )
 
 
-def gwas_associations(trait: str | None = None, limit: int = 100, offset: int = 0) -> AssociationPage:
-    """GWAS Catalog risk alleles the genome carries, optionally filtered by trait substring."""
+GWAS_SORTS = ("rarity", "significance")
+DEFAULT_MAX_CARRIER_FREQ = 0.5
+
+
+def gwas_associations(trait: str | None = None, limit: int = 100, offset: int = 0, *,
+                      sort: str = "rarity", max_carrier_freq: float | None = DEFAULT_MAX_CARRIER_FREQ,
+                      rsid: str | None = None) -> AssociationPage:
+    """GWAS Catalog risk alleles the genome carries, optionally filtered by trait substring.
+
+    Default view: risk alleles carried by at most half of people of this genome's ancestry, rarest
+    first. Nearly everyone carries about half of all common risk alleles, so the unfiltered list is
+    close to "everything" — the rare ones are what's distinctive. ``max_carrier_freq=None`` (or 1)
+    shows all; ``sort="significance"`` restores p-value order.
+    """
     from . import holdback
 
+    if sort not in GWAS_SORTS:
+        raise ValueError(f"sort must be one of {', '.join(GWAS_SORTS)}")
     if trait and holdback.query_is_held(trait):
         return AssociationPage(total=0, limit=limit, offset=offset, trait=trait, hits=[],
                                note=holdback.held_message(f"The trait '{trait}'"))
+    if rsid and holdback.is_held(rsid=rsid):
+        return AssociationPage(total=0, limit=limit, offset=offset, trait=trait, hits=[],
+                               note=holdback.held_message(rsid))
     with connect(read_only=True) as con:
-        exists = con.execute(
-            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'associations'"
-        ).fetchone()[0]
-        if not exists:
+        cols = {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'associations'").fetchall()}
+        if not cols:
             return AssociationPage(total=0, limit=limit, offset=offset, trait=trait, hits=[])
+        has_freq = "carrier_freq" in cols
         where, params = ["TRUE"], []
         if trait:
             where.append("(lower(trait) LIKE ? OR lower(mapped_trait) LIKE ?)")
             params += [f"%{trait.lower()}%", f"%{trait.lower()}%"]
-        clause = " AND ".join(where)
+        if rsid:
+            where.append("lower(rsid) = lower(?)")
+            params.append(rsid.strip())
+        base = " AND ".join(where)
+        capped = has_freq and max_carrier_freq is not None and max_carrier_freq < 1
+        clause = f"{base} AND carrier_freq <= {float(max_carrier_freq)}" if capped else base
         total = con.execute(f"SELECT count(*) FROM associations WHERE {clause}", params).fetchone()[0]
+        order = "carrier_freq ASC NULLS LAST, pval ASC" if (has_freq and sort == "rarity") else "pval ASC"
+        freq_cols = "risk_af, carrier_freq, af_source" if has_freq else "NULL, NULL, NULL"
         rows = con.execute(
             f"SELECT rsid, chrom, pos, risk_allele, dosage, zygosity, trait, mapped_trait, pval, "
-            f"or_beta, pmid FROM associations WHERE {clause} ORDER BY pval ASC LIMIT ? OFFSET ?",
+            f"or_beta, pmid, {freq_cols} FROM associations WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
+        hidden_common = hidden_unknown = 0
+        source = None
+        if capped:
+            hidden_common, hidden_unknown = con.execute(
+                f"SELECT count(*) FILTER (WHERE carrier_freq > {float(max_carrier_freq)}), "
+                f"count(*) FILTER (WHERE carrier_freq IS NULL) FROM associations WHERE {base}", params).fetchone()
+        if has_freq:
+            source = con.execute("SELECT any_value(af_source) FROM associations WHERE af_source IS NOT NULL"
+                                 ).fetchone()[0]
     hits = [Association(rsid=r[0], chrom=r[1], pos=r[2], risk_allele=r[3], dosage=r[4],
                         zygosity=r[5], trait=r[6], mapped_trait=r[7], pval=r[8],
-                        or_beta=r[9], pmid=r[10]) for r in rows]
-    return AssociationPage(total=total, limit=limit, offset=offset, trait=trait, hits=hits)
+                        or_beta=r[9], pmid=r[10], risk_af=r[11], carrier_freq=r[12], af_source=r[13])
+            for r in rows]
+    page = AssociationPage(total=total, limit=limit, offset=offset, trait=trait, hits=hits)
+    caveat = ("WEAK / EXPLORATORY single hits (genome-wide significant, p<5e-8), each with a tiny effect. "
+              "Not a calibrated score (see polygenic_risk) and never sum these ORs.")
+    if not has_freq:
+        page.note = (f"GWAS Catalog risk alleles you carry, by significance — {caveat} Rarity ranking needs "
+                     "allele frequencies: re-run `locus gwas` to add them.")
+    elif capped:
+        page.note = (f"Risk alleles carried by at most {max_carrier_freq:.0%} of people "
+                     f"({source or 'matched ancestry'}), "
+                     f"{'rarest first' if sort == 'rarity' else 'by significance'} — {caveat} Not shown: "
+                     f"{hidden_common:,} more-common and {hidden_unknown:,} unknown-frequency associations "
+                     "(pass max_carrier_freq=1 to include everything). Rare does not mean important: weigh "
+                     "the p-value and replication too.")
+    else:
+        page.note = (f"All carried GWAS risk alleles, {'rarest first' if sort == 'rarity' else 'by significance'} "
+                     f"({source or 'frequency unknown'}) — {caveat}")
+    return page
 
 
 class MarkerGenotype(BaseModel):
@@ -786,8 +842,7 @@ def variant_dossier(rsid: str) -> VariantDossier:
 
     v = page.hits[0]
     gene = (v.gene or "").upper() or None
-    assoc = gwas_associations(limit=25)
-    carried = [a for a in assoc.hits if a.rsid == rsid]
+    carried = gwas_associations(rsid=rsid, max_carrier_freq=None, limit=50).hits
     tr = next((t for t in traits().traits if t.rsid == rsid), None)
     cond = next((c.condition for c in CARRIER_PANEL if gene and c.gene == gene), None)
     gd = next(iter(clingen.for_gene(gene)), None) if gene else None

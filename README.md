@@ -48,7 +48,7 @@ need the BAM/CRAM and are not yet implemented.)
 | **Personality (Big Five)** | Extraversion, agreeableness, conscientiousness, neuroticism, openness as ancestry-matched percentiles from the Nature 2026 personality GWAS's own polygenic indices — kept in its **own spot** (a behavioural tilt of ~1–4% of variance, not disease risk) with the caveat attached (`big_five`) |
 | **Carrier status** | Recessive conditions you carry one copy of (CF, PKU, Tay-Sachs, hearing loss, …) — the family-planning layer, with an explicit list of what a VCF *cannot* assess (SMN1, Fragile X) |
 | **Traits & wellness** | Single-SNP traits (lactose, caffeine, alcohol flush, earwax, eye color, muscle type), the **HLA-B\*57:01** abacavir-hypersensitivity proxy, and your **mtDNA maternal haplogroup** |
-| **GWAS breadth** | Which genome-wide-significant (p<5e-8) risk alleles you carry, across the whole GWAS Catalog, queryable by trait |
+| **GWAS breadth** | Which genome-wide-significant (p<5e-8) risk alleles you carry, across the whole GWAS Catalog, queryable by trait. Since everyone carries about half of all common risk alleles, the default view shows the **less common** ones — carried by at most half of people of your ancestry (1000 Genomes), rarest first |
 | **On-demand** | Paste a new paper's rsIDs and get your genotypes live (`ask_about`) |
 | **Population frequency** | **gnomAD** allele frequencies (via Ensembl) on the variants where rarity matters — those ClinVar has classified or AlphaMissense calls pathogenic |
 | **Literature** | New papers about the **specific variants you carry** (NCBI **LitVar2**, keyed on your clinically-notable rsIDs) and new **PubMed** papers on your notable genes + new **GWAS** associations at your variants, all surfaced into the changelog; ask for the latest research (`literature_for`) or "which variants did this study find that I have?" (`variants_in_study`) |
@@ -139,7 +139,7 @@ Run any command with `uv run locus <command>` (or activate the venv / add an ali
 | `locus ancestry` | Biogeographic ancestry (PCA + k-NN over 1000G + HGDP) + ancestry-calibrated polygenic risk |
 | `locus bigfive` | Big Five personality polygenic indices (Schwaba et al. 2026), ancestry-calibrated; needs `locus download bigfive` |
 | `locus traits` | Genotype single-SNP traits/wellness + HLA-B\*57:01 proxy + mtDNA haplogroup |
-| `locus gwas` | Genotype GWAS Catalog risk alleles (p<5e-8) and store the ones you carry |
+| `locus gwas` | Genotype GWAS Catalog risk alleles (p<5e-8), store the ones you carry, and look up how common each risk allele is in your ancestry (local 1000 Genomes panel; gnomAD fallback) for rarity ranking |
 | `locus report` | Write a self-contained HTML summary of your genome (offline, no scripts, shareable) |
 | `locus gene-disease <GENE>` | ClinGen's curated gene-disease validity for a gene (Definitive → Refuted) |
 | `locus literature <gene\|rsID\|PMID>` | Recent PubMed papers on a gene/rsID, or (for a PubMed ID) which variants that study reported that you carry |

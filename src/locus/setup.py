@@ -62,7 +62,7 @@ def _verify_deps() -> None:
 def _download_all() -> None:
     from . import download
 
-    console.print("Downloading reference + databases (~9 GB; resumable if interrupted)…")
+    console.print("Downloading reference + databases (~22 GB; resumable if interrupted)…")
     download.run("all")
 
 
@@ -129,7 +129,7 @@ def _final() -> None:
     qs = "\n".join(f"  • {q}" for q in EXAMPLE_QUESTIONS)
     console.print(Panel(
         "[bold green]Setup complete![/]\n\n"
-        "1. Fully quit Claude Desktop (Cmd-Q, not just close the window) and reopen it.\n"
+        "1. Open Claude Desktop (if `locus mcp install` said it was skipped, quit Desktop and re-run it).\n"
         "2. Then ask Claude (Desktop or Code) things like:\n"
         f"{qs}\n\n"
         "Prefer a visual UI? Open the [bold]Locus[/] app (Dock) or run [bold]locus serve api[/].\n\n"
@@ -141,7 +141,7 @@ def _final() -> None:
 
 def run(*, skip_app: bool = False, assume_yes: bool = False, skip_download: bool = False) -> None:
     console.print(Panel(
-        "[bold]Locus — full setup[/]\nDownloads ~9 GB of reference databases and builds your local "
+        "[bold]Locus — full setup[/]\nDownloads ~22 GB of reference databases and builds your local "
         "genome store, then registers it with Claude. ~20–40 minutes, one-time. Your genome and your "
         "genotypes stay on your Mac; lookups send only public IDs (rsIDs, gene names).",
         border_style="cyan"))
@@ -149,7 +149,7 @@ def run(*, skip_app: bool = False, assume_yes: bool = False, skip_download: bool
 
     _step("1/8  Checking tools", _verify_deps)
     if not skip_download:
-        _step("2/8  Downloading databases (~9 GB)", _download_all)
+        _step("2/8  Downloading databases (~22 GB)", _download_all)
     _step("3/8  Locating your genome", lambda: _genome_gate(assume_yes))
     _step("4/8  Building the genome database", _build_db)
     _step("5/8  Ancestry + polygenic risk", _ancestry)

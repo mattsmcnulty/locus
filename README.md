@@ -146,6 +146,7 @@ Run any command with `uv run locus <command>` (or activate the venv / add an ali
 | `locus refresh [--dry-run] [--force] [--sources clinvar,pgs,cpic,gwas,pubmed,litvar,clingen]` | Check tracked sources for new releases and re-interpret what changed (ClinVar reanalysis, new PGS, CPIC updates, new GWAS associations at your variants, new LitVar/PubMed papers on your variants & genes) |
 | `locus schedule install [--weekday N] [--hour H]` | Install a weekly macOS launchd job that runs `locus refresh` |
 | `locus schedule status` / `locus schedule uninstall` | Show / remove the scheduled job |
+| `locus holdback list` / `add <topic>` / `remove <topic>` | Hold back topics you'd rather not see (e.g. `alzheimers`, incl. APOE) — hidden from Claude, the app and reports; never deleted |
 | `locus serve mcp` | Start the MCP server (stdio) — what Claude connects to |
 | `locus serve api` | Start the FastAPI backend and serve the built SPA at `http://127.0.0.1:8787` |
 
@@ -327,6 +328,27 @@ uv run pytest -q                       # full pipeline test on the synthetic fix
 uv run ruff check src tests scripts    # lint (line length 120)
 cd web && npm run build                # type-check + build the SPA
 ```
+
+## Holding back topics you'd rather not see
+
+Some results are ones people choose not to know — most often Alzheimer's risk (APOE). Nothing is held back by
+default; you opt in per topic:
+
+```bash
+locus holdback list                 # what's held back + the topics available
+locus holdback add alzheimers       # presets: alzheimers, huntington, parkinsons, als, hereditary-cancer, psychiatric
+locus holdback add mine --gene CFTR --keyword "cystic fibrosis"   # or define your own
+locus holdback remove alzheimers    # show it again
+```
+
+A held-back topic disappears from **every** surface: all MCP tools (including `run_sql`), the web
+app, the HTML report, live rsID/study lookups, PubMed results and the weekly refresh report. It's
+matched by gene, by rsID, by trait/disease wording, and by the gene's position (taken from ClinVar,
+so what's hidden never depends on your own genotype). A gene's variants are hidden under *every*
+trait — APOE's rs7412 is also a top LDL-cholesterol hit, and showing it would give the answer away.
+Claude is told the topic is held back, so it says so instead of reading the gap as "you don't have
+it". Nothing is deleted: removing the holdback brings everything back. It's a preference that keeps
+you from stumbling onto a result, not a lock against someone with access to your files.
 
 ## Privacy & data
 

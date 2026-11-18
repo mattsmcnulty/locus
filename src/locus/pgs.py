@@ -41,8 +41,29 @@ class SampleScore:
     n_total: int      # variants in the score
     n_used: int       # variants with a confident sample genotype
     coverage: float   # n_used / n_total
-    # (chrom_nochr, pos) -> weight, for the variants actually used (to score the panel identically).
-    used: dict[tuple[str, int], float] = None  # type: ignore[assignment]
+    # (chrom_nochr, pos) -> (effect_allele, weight), for the variants actually used (to score the panel).
+    used: dict[tuple[str, int], tuple[str, float]] = None  # type: ignore[assignment]
+    # (chrom_nochr, pos) -> sample effect-allele count, so the raw score can be re-summed over a subset.
+    counts: dict[tuple[str, int], int] = None  # type: ignore[assignment]
+
+    def raw_over(self, keys) -> float:
+        """The sample's score summed over just ``keys`` (a subset of ``used``)."""
+        return sum(self.counts[k] * self.used[k][1] for k in keys)
+
+
+@dataclass
+class RefComparison:
+    """Where the sample sits in its ancestry-matched reference — computed over ONE variant set.
+
+    PLINK drops some of the sample's variants when scoring the panel (multiallelic / non-SNP /
+    duplicate positions, or absent from the panel). Comparing a sample sum over N variants against
+    panel sums over N−k is apples-to-oranges, so ``raw``/``n_used`` are re-derived over exactly the
+    variants the panel kept.
+    """
+    raw: float
+    n_used: int
+    percentile: float | None
+    z: float | None
 
 
 # A small curated, high-value starter set (GRCh38-harmonized PGS Catalog IDs).
@@ -50,7 +71,7 @@ CURATED_PGS = [
     ("PGS000018", "Coronary artery disease"),   # genome-wide metaGRS (~1.7M variants; slow)
     ("PGS000065", "LDL cholesterol"),
     ("PGS000868", "Type 2 diabetes"),
-    ("PGS000192", "Lipoprotein(a) / lipids"),
+    ("PGS000192", "Cholesterol (LDL/HDL, 9-SNP)"),
 ]
 
 
@@ -140,7 +161,8 @@ def score_sample(scoring_file: Path, pgs_id: str) -> SampleScore:
     vcf.close()
 
     raw = 0.0
-    used: dict[tuple[str, int], float] = {}
+    used: dict[tuple[str, int], tuple[str, float]] = {}
+    counts: dict[tuple[str, int], int] = {}
     for v in variants:
         hit = calls.get((v.chrom, v.pos))
         if hit is None:
@@ -151,11 +173,13 @@ def score_sample(scoring_file: Path, pgs_id: str) -> SampleScore:
             continue
         raw += n * v.weight
         # Key by the panel's non-chr naming; keep effect allele + weight to score the panel identically.
-        used[(v.chrom.replace("chr", ""), v.pos)] = (v.effect_allele, v.weight)
+        key = (v.chrom.replace("chr", ""), v.pos)
+        used[key] = (v.effect_allele, v.weight)
+        counts[key] = n
 
     return SampleScore(
         pgs_id=pgs_id, raw=raw, n_total=len(variants), n_used=len(used),
-        coverage=(len(used) / len(variants) if variants else 0.0), used=used,
+        coverage=(len(used) / len(variants) if variants else 0.0), used=used, counts=counts,
     )
 
 
@@ -175,8 +199,12 @@ def _ref_labels() -> tuple[list[str], dict[str, str]]:
     return iids, superpop
 
 
-def score_reference(score: SampleScore) -> np.ndarray:
-    """Score the reference panel on EXACTLY the variants the sample used (PLINK2 --score)."""
+def score_reference(score: SampleScore) -> tuple[np.ndarray, set[tuple[str, int]]]:
+    """Score the reference panel on the sample's variants (PLINK2 --score).
+
+    Returns the per-reference-sample sums AND the set of variants PLINK actually scored, which can
+    be smaller than ``score.used`` — callers must compare the sample over that same set.
+    """
     from . import ancestry, shell
 
     pgen, pvar, psam = ancestry._panel()
@@ -187,12 +215,14 @@ def score_reference(score: SampleScore) -> np.ndarray:
     extract.write_text("".join(f"{c}:{p}\n" for (c, p) in score.used))
 
     out = wd / f"{score.pgs_id}.refscore"
+    vars_file = Path(str(out) + ".sscore.vars")
+    vars_file.unlink(missing_ok=True)
     shell.run([
         str(ancestry.plink2()), "--pgen", str(pgen), "--pvar", str(pvar), "--psam", str(psam),
         # Biallelic SNPs + dedup so chrom:pos IDs are unique (multiallelics collide otherwise).
         "--max-alleles", "2", "--snps-only", "--set-all-var-ids", "@:#", "--rm-dup", "exclude-all",
         "--extract", str(extract),
-        "--score", str(sf), "1", "2", "3", "header-read", "cols=+scoresums",
+        "--score", str(sf), "1", "2", "3", "header-read", "cols=+scoresums", "list-variants",
         "--out", str(out),
     ])
     # .sscore: per-sample; SCORE1_SUM column = sum(dosage*weight).
@@ -205,23 +235,48 @@ def score_reference(score: SampleScore) -> np.ndarray:
             f = line.rstrip("\n").split("\t")
             sscore[f[iid_col]] = float(f[col])
     iids, _ = _ref_labels()
-    return np.array([sscore.get(i, np.nan) for i in iids])
+    return np.array([sscore.get(i, np.nan) for i in iids]), _scored_variants(vars_file, score)
+
+
+def _scored_variants(vars_file: Path, score: SampleScore) -> set[tuple[str, int]]:
+    """Parse PLINK's ``list-variants`` output (``chrom:pos`` per line) into ``used`` keys."""
+    if not vars_file.exists():
+        raise RuntimeError(f"PLINK did not write {vars_file.name}; can't align sample and panel variant sets")
+    kept: set[tuple[str, int]] = set()
+    for line in vars_file.read_text().splitlines():
+        c, _, p = line.strip().rpartition(":")
+        if c and p.isdigit() and (c, int(p)) in score.used:
+            kept.add((c, int(p)))
+    return kept
+
+
+def compare_to_reference(score: SampleScore, superpop: str | None) -> RefComparison | None:
+    """Percentile + z of the sample within its ancestry-matched panel, over ONE shared variant set."""
+    if not (superpop and score.used):
+        return None
+    ref, kept = score_reference(score)
+    iids, sp = _ref_labels()
+    mask = np.array([sp.get(i) == superpop for i in iids]) & ~np.isnan(ref)
+    if mask.sum() < 20 or not kept:
+        return None
+    raw = score.raw_over(kept)
+    dist = ref[mask]
+    sd = float(dist.std())
+    return RefComparison(
+        raw=raw, n_used=len(kept),
+        percentile=round(float((dist < raw).mean() * 100), 1),
+        z=round(float((raw - dist.mean()) / sd), 2) if sd > 0 else None,
+    )
 
 
 def calibrate(score: SampleScore, trait: str, nearest_superpop: str | None) -> CalibratedScore:
     """Percentile of the sample's raw score within its ancestry-matched reference distribution."""
-    pct: float | None = None
-    anc = nearest_superpop
-    if nearest_superpop and score.used:
-        ref = score_reference(score)
-        iids, superpop = _ref_labels()
-        mask = np.array([superpop.get(i) == nearest_superpop for i in iids]) & ~np.isnan(ref)
-        if mask.sum() >= 20:
-            dist = ref[mask]
-            pct = round(float((dist < score.raw).mean() * 100), 1)
+    cmp = compare_to_reference(score, nearest_superpop)
+    raw, n_used = (cmp.raw, cmp.n_used) if cmp else (score.raw, score.n_used)
     return CalibratedScore(
-        pgs_id=score.pgs_id, trait=trait, raw=round(score.raw, 4), percentile=pct,
-        ancestry=anc, n_used=score.n_used, coverage=round(score.coverage, 3),
+        pgs_id=score.pgs_id, trait=trait, raw=round(raw, 4), percentile=cmp.percentile if cmp else None,
+        ancestry=nearest_superpop, n_used=n_used,
+        coverage=round(n_used / score.n_total, 3) if score.n_total else 0.0,
     )
 
 

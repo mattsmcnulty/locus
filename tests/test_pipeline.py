@@ -1334,3 +1334,163 @@ def test_write_bigfive_refuses_to_wipe_and_is_preserved(genome):
     load.run()               # variant reload preserves it
     with connect(read_only=True) as con:
         assert con.execute("SELECT count(*) FROM personality_pgi").fetchone()[0] == 1
+
+
+def test_eye_color_blue_allele_is_forward_strand_g():
+    """rs12913832: G is the blue allele on the forward strand (GG = blue). It was inverted."""
+    from locus import panels
+
+    snp = next(t for t in panels.TAG_SNPS if t.rsid == "rs12913832")
+    assert (snp.effect_allele, snp.other_allele) == ("G", "A")
+    assert "Blue" in snp.interp[2] and "GG" in snp.interp[2]
+    assert "Brown" in snp.interp[0] and "AA" in snp.interp[0]
+
+
+def test_pgs_percentile_compares_one_variant_set(tmp_path, monkeypatch):
+    """PLINK drops some of the sample's variants when scoring the panel; the sample must then be
+    re-summed over exactly the panel's kept set, or the percentile compares different sums."""
+    import numpy as np
+
+    from locus import pgs
+
+    used = {("1", 100): ("A", 1.0), ("2", 200): ("C", 2.0), ("3", 300): ("G", 50.0)}
+    counts = {("1", 100): 1, ("2", 200): 2, ("3", 300): 2}
+    ss = pgs.SampleScore(pgs_id="T", raw=105.0, n_total=4, n_used=3, coverage=0.75, used=used, counts=counts)
+
+    vars_file = tmp_path / "T.sscore.vars"
+    vars_file.write_text("1:100\n2:200\nX:999\n")  # panel dropped 3:300; X:999 isn't ours
+    kept = pgs._scored_variants(vars_file, ss)
+    assert kept == {("1", 100), ("2", 200)}
+    assert ss.raw_over(kept) == 5.0
+
+    iids = [f"s{i}" for i in range(40)]
+    monkeypatch.setattr(pgs, "score_reference", lambda s: (np.arange(40, dtype=float) / 4, kept))
+    monkeypatch.setattr(pgs, "_ref_labels", lambda: (iids, {i: "EUR" for i in iids}))
+    cmp = pgs.compare_to_reference(ss, "EUR")
+    assert cmp.raw == 5.0 and cmp.n_used == 2   # not the 105 summed over a variant the panel lacks
+    assert cmp.percentile == 50.0               # 20 of 40 panel scores (0..9.75) fall below 5.0
+    cal = pgs.calibrate(ss, "Test", "EUR")
+    assert (cal.raw, cal.n_used, cal.coverage) == (5.0, 2, 0.5)
+
+
+def test_mcp_install_skips_desktop_while_it_is_open(tmp_path, monkeypatch):
+    """A running Claude Desktop rewrites its config and silently drops a new entry, so never write it
+    then report 'registered'. Non-interactive: skip Desktop (untouched), still register Code."""
+    import json
+
+    from locus import mcp_install
+
+    desk, code = tmp_path / "desktop.json", tmp_path / ".mcp.json"
+    desk.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+    monkeypatch.setattr(mcp_install, "desktop_config_path", lambda: desk)
+    monkeypatch.setattr(mcp_install, "code_config_path", lambda: code)
+    monkeypatch.setattr(mcp_install, "desktop_running", lambda: True)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    assert mcp_install.run() is False
+    assert "locus" not in json.loads(desk.read_text())["mcpServers"]   # Desktop left alone
+    assert "locus" in json.loads(code.read_text())["mcpServers"]       # Code still registered
+
+    monkeypatch.setattr(mcp_install, "desktop_running", lambda: False)  # once quit, it registers
+    assert mcp_install.run() is True
+    assert set(json.loads(desk.read_text())["mcpServers"]) == {"other", "locus"}
+
+
+@pytest.fixture()
+def holdback_store(tmp_path):
+    """A tiny hand-built store with APOE rows, an APOE-region neighbour, and unrelated rows."""
+    import duckdb
+
+    from locus import load
+    from locus.config import settings
+
+    base = tmp_path / "data"
+    (base / "annotations").mkdir(parents=True)
+    settings.data_dir = base
+    settings.db_path = base / "locus.duckdb"
+    con = duckdb.connect(str(settings.db_path))
+    load._create_schema(con)
+    con.execute("CREATE TABLE IF NOT EXISTS variants(chrom VARCHAR, pos BIGINT, ref VARCHAR, alt VARCHAR, "
+                "rsid VARCHAR, gt VARCHAR, filter VARCHAR, gene VARCHAR, consequence VARCHAR, clnsig VARCHAR, "
+                "clndn VARCHAR, clnrevstat VARCHAR, gnomad_af DOUBLE, gnomad_af_grpmax DOUBLE, "
+                "am_pathogenicity DOUBLE, am_class VARCHAR)")
+    rows = [("chr19", 44908684, "T", "C", "rs429358", "0/1", "PASS", "APOE", "missense", None, None),
+            ("chr19", 44909000, "G", "A", "rs999001", "0/1", "PASS", "TOMM40", "intron", None, None),  # in APOE span
+            ("chr1", 1000, "A", "G", "rs111", "0/1", "PASS", "GENE1", "missense", "Pathogenic",
+             "Alzheimer_disease"),                                                                     # disease keyword
+            ("chr7", 117559590, "A", "G", "rs222", "0/1", "PASS", "CFTR", "missense", None, None)]
+    con.executemany("INSERT INTO variants (chrom,pos,ref,alt,rsid,gt,filter,gene,consequence,clnsig,clndn) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+    con.executemany("INSERT INTO associations (rsid, chrom, pos, risk_allele, dosage, zygosity, trait, "
+                    "mapped_trait, pval, or_beta, pmid) VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
+        ("rs7412", "chr19", 44908822, "C", 1, "het", "LDL cholesterol", "LDL cholesterol", 1e-300, 0.5, "1"),
+        ("rs555", "chr2", 500, "A", 1, "het", "Late-onset Alzheimer's disease", "Alzheimer disease", 1e-9, 1.1, "2"),
+        ("rs666", "chr3", 600, "G", 1, "het", "Height", "body height", 1e-20, 0.1, "3")])
+    con.execute("INSERT INTO meta VALUES ('build', 'GRCh38')")
+    con.close()
+
+    clinvar = base / "annotations" / "clinvar.chr.vcf"
+    clinvar.write_text(
+        "##fileformat=VCFv4.2\n##contig=<ID=chr19,length=60000000>\n"
+        '##INFO=<ID=GENEINFO,Number=1,Type=String,Description="">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+        "chr19\t44905579\t1\tA\tG\t.\t.\tGENEINFO=APOE:348\n"
+        "chr19\t44911194\t2\tA\tG\t.\t.\tGENEINFO=APOE:348|APOC1:341\n")
+    subprocess.run(["bgzip", "-f", str(clinvar)], check=True)
+    return base
+
+
+def test_holdback_hides_everywhere_and_comes_back(holdback_store):
+    from locus import holdback, queries, refresh
+
+    assert queries.lookup_by_gene("APOE").total == 1          # nothing held back by default
+    holdback.add_preset("alzheimers")
+
+    page = queries.lookup_by_gene("APOE")
+    assert page.total == 0 and "held back" in page.note
+    assert "held back" in queries.lookup_by_rsid("rs429358").note
+    assert not queries.variant_dossier("rs429358").found
+    # Hidden by position (ClinVar's APOE span), by disease keyword — not just by gene label.
+    assert queries.lookup_by_rsid("rs999001").total == 0
+    assert queries.lookup_by_gene("GENE1").total == 0
+    assert queries.lookup_by_gene("CFTR").total == 1          # unrelated rows untouched
+    # rs7412 is hidden even under an innocuous trait: its genotype would reveal APOE status.
+    traits = {h.trait for h in queries.gwas_associations().hits}
+    assert traits == {"Height"}
+    assert "held back" in queries.gwas_associations(trait="alzheimer").note
+    # Raw SQL sees the same filtered store and can't step around it.
+    assert queries.run_sql("SELECT count(*) FROM variants")["rows"] == [[1]]
+    for bad in ("SELECT * FROM locus.variants", "SELECT * FROM query('select 1')",
+                "SELECT * FROM read_csv('x.vcf')", "SELECT * FROM 'data/genome/x.vcf.gz'"):
+        with pytest.raises(ValueError):
+            queries.run_sql(bad)
+    assert "held_back" in queries.overview()
+    # Weekly report: stored in full, but held findings aren't written/printed.
+    f_held = refresh.Finding(source="pubmed", kind="paper", tier="weak", title="APOE e4 and dementia", gene="APOE")
+    f_ok = refresh.Finding(source="pubmed", kind="paper", tier="weak", title="CFTR modifiers", gene="CFTR")
+    assert refresh._shown([f_held, f_ok]) == [f_ok]
+
+    assert holdback.remove("alzheimers")
+    assert queries.lookup_by_gene("APOE").total == 1 and queries.lookup_by_rsid("rs999001").total == 1
+
+
+def test_holdback_empty_note_does_not_depend_on_genotype(holdback_store):
+    """'Hidden' vs 'shown' must not reveal whether the person carries something: with a holdback on,
+    EVERY empty lookup carries the same caveat, held-topic or not."""
+    from locus import holdback, queries
+
+    holdback.add_preset("huntington")
+    note_absent = queries.lookup_by_rsid("rs123456789").note        # simply not in the store
+    assert note_absent and "held back" in note_absent
+    assert queries.lookup_by_rsid("rs222").note is None              # a real hit needs no caveat
+
+
+def test_holdback_custom_topic_validation(holdback_store):
+    from locus import holdback
+
+    holdback.add_custom("mine", genes=["cftr"], keywords=["cystic fibrosis"])
+    assert holdback.is_held(gene="CFTR") and holdback.is_held(text="Cystic Fibrosis carrier")
+    with pytest.raises(ValueError):
+        holdback.add_custom("bad", genes=["APOE'; DROP TABLE variants; --"])
+    with pytest.raises(ValueError):
+        holdback.add_custom("empty")

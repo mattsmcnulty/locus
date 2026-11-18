@@ -38,6 +38,12 @@ def connect(read_only: bool = False, db_path: Path | None = None) -> Iterator[du
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(path), read_only=read_only)
     try:
+        if read_only:
+            # Every reader (MCP, API/SPA, report, run_sql) sees held-back topics filtered out.
+            # Writers (load/refresh) see everything, so removing a holdback brings it all back.
+            from .holdback import install_views
+
+            install_views(conn)
         yield conn
     finally:
         conn.close()

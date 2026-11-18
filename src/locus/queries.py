@@ -12,6 +12,7 @@ import re
 
 from pydantic import BaseModel, Field
 
+from .config import settings
 from .db import connect
 
 # Columns surfaced for a variant, in a fixed order.
@@ -46,6 +47,7 @@ class VariantPage(BaseModel):
     limit: int
     offset: int
     hits: list[Variant]
+    note: str | None = Field(default=None, description="Set when results are held back by the person's settings")
 
 
 class PgxGene(BaseModel):
@@ -83,7 +85,12 @@ def _rows_to_variants(rows) -> list[Variant]:
     return [Variant(**dict(zip(_VAR_COLS, r, strict=True))) for r in rows]
 
 
-def _var_select(where: str, params: list, limit: int, offset: int) -> VariantPage:
+def _var_select(where: str, params: list, limit: int, offset: int, *, held: str | None = None) -> VariantPage:
+    """Select variants. ``held`` names what was asked for when it is itself held back."""
+    from . import holdback
+
+    if held:
+        return VariantPage(total=0, limit=limit, offset=offset, hits=[], note=holdback.held_message(held))
     cols = ", ".join(_VAR_COLS)
     with connect(read_only=True) as con:
         total = con.execute(f"SELECT count(*) FROM variants WHERE {where}", params).fetchone()[0]
@@ -91,7 +98,30 @@ def _var_select(where: str, params: list, limit: int, offset: int) -> VariantPag
             f"SELECT {cols} FROM variants WHERE {where} ORDER BY chrom, pos LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
-    return VariantPage(total=total, limit=limit, offset=offset, hits=_rows_to_variants(rows))
+    # An empty answer normally means homozygous-reference; with topics held back it might instead be
+    # hidden. Say so whenever the result is empty — regardless of genotype, so it leaks nothing.
+    note = None
+    if not rows and (spec := holdback.load()):
+        note = ("No rows. Usually that means homozygous-reference, but some topics are held back by the "
+                f"person's settings ({'; '.join(t.label for t in spec.topics)}); results in those are hidden "
+                "whether present or not.")
+    return VariantPage(total=total, limit=limit, offset=offset, hits=_rows_to_variants(rows), note=note)
+
+
+def _held_target(*, gene: str | None = None, rsid: str | None = None, region: str | None = None) -> str | None:
+    """If the request itself names something held back, a label for it (else None)."""
+    from . import holdback
+
+    if gene and holdback.is_held(gene=gene):
+        return f"Gene {gene.upper()}"
+    if rsid and holdback.is_held(rsid=rsid):
+        return rsid
+    if region:
+        chrom, start, end = parse_region(region)
+        for g, (c, a, b) in holdback.gene_spans().items():
+            if c == chrom and a <= start and end <= b:  # wholly inside; overlaps are just filtered
+                return f"Region {region} (inside {g})"
+    return None
 
 
 # ── Region parsing ────────────────────────────────────────────────────────────
@@ -116,16 +146,17 @@ def lookup_by_rsid(rsid: str, limit: int = 50, offset: int = 0) -> VariantPage:
     rsid = rsid.strip()
     if not rsid.lower().startswith("rs"):
         rsid = "rs" + rsid
-    return _var_select("rsid = ?", [rsid], limit, offset)
+    return _var_select("rsid = ?", [rsid], limit, offset, held=_held_target(rsid=rsid))
 
 
 def lookup_by_gene(gene: str, limit: int = 100, offset: int = 0) -> VariantPage:
-    return _var_select("upper(gene) = upper(?)", [gene.strip()], limit, offset)
+    return _var_select("upper(gene) = upper(?)", [gene.strip()], limit, offset, held=_held_target(gene=gene.strip()))
 
 
 def lookup_by_region(region: str, limit: int = 200, offset: int = 0) -> VariantPage:
     chrom, start, end = parse_region(region)
-    return _var_select("chrom = ? AND pos BETWEEN ? AND ?", [chrom, start, end], limit, offset)
+    return _var_select("chrom = ? AND pos BETWEEN ? AND ?", [chrom, start, end], limit, offset,
+                       held=_held_target(region=region))
 
 
 def clinical_findings(
@@ -148,7 +179,8 @@ def clinical_findings(
     if gene:
         where.append("upper(gene) = upper(?)")
         params.append(gene.strip())
-    return _var_select(" AND ".join(where), params, limit, offset)
+    return _var_select(" AND ".join(where), params, limit, offset,
+                       held=_held_target(gene=gene.strip()) if gene else None)
 
 
 def predicted_damaging(
@@ -169,7 +201,8 @@ def predicted_damaging(
     if gene:
         where.append("upper(gene) = upper(?)")
         params.append(gene.strip())
-    return _var_select(" AND ".join(where), params, limit, offset)
+    return _var_select(" AND ".join(where), params, limit, offset,
+                       held=_held_target(gene=gene.strip()) if gene else None)
 
 
 def allele_frequency(region_or_variant: str) -> VariantPage:
@@ -357,13 +390,25 @@ _FORBIDDEN_SQL = re.compile(
 )
 
 
+# Table functions / string-literal sources that read FILES rather than the store: they'd let a query
+# read the raw VCFs (or anything on disk), around both the store and any held-back topics.
+_FILE_READ_SQL = re.compile(
+    r"\b(read_\w+|parquet_scan|csv_scan|sniff_csv|glob|delta_scan|iceberg_scan)\s*\(|\bfrom\s+'", re.IGNORECASE
+)
+
+
 def run_sql(sql: str, max_rows: int = 200) -> dict:
     """Run a read-only SELECT against the store. Rejects any mutating statement."""
+    from . import holdback
+
     s = sql.strip().rstrip(";")
     if not re.match(r"^\s*(select|with)\b", s, re.IGNORECASE):
         raise ValueError("Only SELECT/WITH queries are allowed.")
     if _FORBIDDEN_SQL.search(s):
         raise ValueError("Query contains a disallowed keyword.")
+    if _FILE_READ_SQL.search(s):
+        raise ValueError("Queries can read the Locus tables only, not files.")
+    holdback.check_sql(s, db_name=settings.db_path.stem)
     with connect(read_only=True) as con:
         cur = con.execute(s)
         names = [d[0] for d in cur.description]
@@ -619,6 +664,11 @@ class AssociationPage(BaseModel):
 
 def gwas_associations(trait: str | None = None, limit: int = 100, offset: int = 0) -> AssociationPage:
     """GWAS Catalog risk alleles the genome carries, optionally filtered by trait substring."""
+    from . import holdback
+
+    if trait and holdback.query_is_held(trait):
+        return AssociationPage(total=0, limit=limit, offset=offset, trait=trait, hits=[],
+                               note=holdback.held_message(f"The trait '{trait}'"))
     with connect(read_only=True) as con:
         exists = con.execute(
             "SELECT count(*) FROM information_schema.tables WHERE table_name = 'associations'"
@@ -722,6 +772,8 @@ def variant_dossier(rsid: str) -> VariantDossier:
     litvar = f"https://www.ncbi.nlm.nih.gov/research/litvar2/docsum?text={rsid}"
 
     page = lookup_by_rsid(rsid, limit=1)
+    if not page.hits and page.note and "held back by this person" in page.note:
+        return VariantDossier(rsid=rsid, found=False, literature_url="", note=page.note)
     if not page.hits:
         return VariantDossier(
             rsid=rsid, found=False, literature_url=litvar,
@@ -729,7 +781,8 @@ def variant_dossier(rsid: str) -> VariantDossier:
                   f"homozygous-reference (the store keeps non-reference sites, so hom-ref calls "
                   f"simply aren't rows) — it does NOT mean the variant was ruled out or that the "
                   f"lookup failed. Use `ask_about` with this rsID to genotype the position live "
-                  f"and be certain before telling anyone they 'don't have' it."))
+                  f"and be certain before telling anyone they 'don't have' it."
+                  + (f" {page.note}" if page.note else "")))
 
     v = page.hits[0]
     gene = (v.gene or "").upper() or None
@@ -773,7 +826,11 @@ def overview() -> dict:
         pgx = con.execute("SELECT count(*) FROM pgx_genes").fetchone()[0]
         cnv = con.execute("SELECT count(*) FROM cnv").fetchone()[0]
         sv = con.execute("SELECT count(*) FROM sv").fetchone()[0]
+    from . import holdback
+
+    held = holdback.note()
     return {
+        **({"held_back": held} if held else {}),
         "meta": meta,
         "variants": n,
         "clinvar_annotated": annotated,

@@ -142,3 +142,14 @@ def sql(body: SqlBody):
 _DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 if _DIST.exists():
     app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="spa")
+else:
+    from fastapi.responses import HTMLResponse
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def _spa_not_built() -> str:
+        # A bare 404 here looked like a broken install (e.g. the Dock app on a fresh checkout).
+        return ("<!doctype html><title>Locus</title><body style='font:16px system-ui;max-width:40em;"
+                "margin:4em auto;padding:0 1em'><h1>Locus API is running</h1><p>The web UI hasn't "
+                "been built yet. In the Locus folder run <code>make web-build</code> (needs Node.js: "
+                "<code>brew install node</code>), then reload. The JSON API is at <a href='/docs'>/docs</a>."
+                "</p></body>")

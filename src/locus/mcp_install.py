@@ -1,9 +1,12 @@
 """Register the Locus MCP server with Claude (Desktop + Code).
 
 Writes the small JSON that points Claude at this repo's ``locus-mcp`` server, using THIS
-checkout's absolute path (the committed ``.mcp.json`` hardcodes the author's path, which is
-wrong on anyone else's machine) and an absolute ``uv`` (Claude Desktop has no shell PATH).
-Existing config is backed up and safe-merged — other MCP servers are preserved.
+checkout's absolute path (so ``.mcp.json`` is generated per machine and gitignored, never
+committed) and an absolute ``uv`` (Claude Desktop has no shell PATH). Existing config is backed
+up and safe-merged — other MCP servers are preserved.
+
+Claude Desktop must be QUIT while its config is written: a running Desktop rewrites
+``claude_desktop_config.json`` from memory and silently drops an entry added underneath it.
 """
 
 from __future__ import annotations
@@ -11,6 +14,9 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -71,13 +77,50 @@ def _install_into(path: Path, *, label: str) -> bool:
     return True
 
 
-def run() -> None:
-    """Register the MCP server with both Claude Desktop and Claude Code."""
+def desktop_running() -> bool:
+    """Is the Claude Desktop app open? (It owns its config while running.)"""
+    try:
+        return subprocess.run(["pgrep", "-f", "Claude.app/Contents/MacOS/Claude"],
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def _wait_for_desktop_quit(timeout_s: int = 300) -> bool:
+    """Ask the user to quit Claude Desktop and wait for it. False if it's still open (or non-interactive)."""
+    if not desktop_running():
+        return True
+    if not sys.stdin.isatty():
+        return False
+    console.print("[yellow]Claude Desktop is open. It rewrites its config while running and would silently "
+                  "drop the Locus entry.[/]\n[bold]Quit Claude Desktop now (Cmd-Q, not just close the "
+                  "window)[/] — waiting…")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        if not desktop_running():
+            time.sleep(1)  # let it finish its own last write before we touch the file
+            return True
+    return False
+
+
+def run() -> bool:
+    """Register the MCP server with Claude Code, and with Claude Desktop once it's quit.
+
+    Returns True if Desktop was registered (False if it was left open and skipped).
+    """
     console.rule("[bold]Register MCP server with Claude")
-    _install_into(desktop_config_path(), label="Claude Desktop")
+    desktop_ok = False
+    if _wait_for_desktop_quit():
+        desktop_ok = _install_into(desktop_config_path(), label="Claude Desktop")
+    else:
+        console.print("[yellow]Claude Desktop: NOT registered — it's still open, and it would overwrite the "
+                      "entry. Quit it (Cmd-Q), then run `locus mcp install` again.[/]")
     _install_into(code_config_path(), label="Claude Code (.mcp.json)")
-    console.print("[dim]Fully quit Claude Desktop (Cmd-Q) and reopen it to load the server. "
-                  "Claude Code picks up .mcp.json automatically in this folder.[/]")
+    if desktop_ok:
+        console.print("[dim]Open Claude Desktop to load the server. "
+                      "Claude Code picks up .mcp.json automatically in this folder.[/]")
+    return desktop_ok
 
 
 def _registered_dir(path: Path) -> str | None:

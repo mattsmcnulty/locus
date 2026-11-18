@@ -28,7 +28,6 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 from rich.console import Console
 
 from . import download, pgs, shell
@@ -146,22 +145,6 @@ def convert(code: str, *, force: bool = False) -> Path:
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────────
-def _calibrate(ss: pgs.SampleScore, superpop: str | None) -> tuple[float | None, float | None]:
-    """Percentile AND z of the sample within the ancestry-matched reference (one PLINK2 pass)."""
-    if not (superpop and ss.used):
-        return None, None
-    ref = pgs.score_reference(ss)
-    iids, sp = pgs._ref_labels()
-    mask = np.array([sp.get(i) == superpop for i in iids]) & ~np.isnan(ref)
-    if mask.sum() < 20:
-        return None, None
-    dist = ref[mask]
-    pct = round(float((dist < ss.raw).mean() * 100), 1)
-    sd = float(dist.std())
-    z = round(float((ss.raw - dist.mean()) / sd), 2) if sd > 0 else None
-    return pct, z
-
-
 def stored_superpop() -> str | None:
     """The nearest continental ancestry `locus ancestry` recorded for this genome (None if not run)."""
     from .db import connect, db_exists
@@ -195,10 +178,15 @@ def run(nearest_superpop: str | None = None) -> list[BigFiveScore]:
         try:
             sf = convert(code)
             ss = pgs.score_sample(sf, f"ReGPC_{code}")
-            pct, z = _calibrate(ss, superpop)
-            s = BigFiveScore(code=code, trait=label, raw=round(ss.raw, 4), percentile=pct, z=z,
-                             ancestry=superpop if pct is not None else None, n_used=ss.n_used,
-                             coverage=round(ss.coverage, 3), beta=VALIDATION_BETA[code])
+            # Sample and panel compared over the SAME variants (pgs.compare_to_reference re-sums the
+            # sample over exactly what PLINK scored in the panel).
+            cmp = pgs.compare_to_reference(ss, superpop)
+            raw, n_used = (cmp.raw, cmp.n_used) if cmp else (ss.raw, ss.n_used)
+            pct, z = (cmp.percentile, cmp.z) if cmp else (None, None)
+            s = BigFiveScore(code=code, trait=label, raw=round(raw, 4), percentile=pct, z=z,
+                             ancestry=superpop if pct is not None else None, n_used=n_used,
+                             coverage=round(n_used / ss.n_total, 3) if ss.n_total else 0.0,
+                             beta=VALIDATION_BETA[code])
             shown = f"{pct:.0f}th pct ({superpop}), z {z:+.2f}" if pct is not None else "raw only"
             console.print(f"  {label:24} {shown:30} coverage {s.coverage:.0%}")
             results.append(s)

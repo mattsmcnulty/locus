@@ -698,7 +698,20 @@ def _reanalyze_clingen() -> list[Finding]:
 ALL_SOURCES = ["clinvar", "pgs", "cpic", "gwas", "pubmed", "litvar", "clingen"]
 
 
+def _shown(findings: list[Finding]) -> list[Finding]:
+    """Findings minus held-back topics. Everything is still STORED (so removing a holdback brings it
+    back); only what's written to the report file / printed to the log is filtered."""
+    from . import holdback
+
+    spec = holdback.load()
+    if not spec:
+        return findings
+    return [f for f in findings if not holdback.is_held(
+        gene=f.gene, rsid=f.rsid, chrom=f.chrom, pos=f.pos, text=f"{f.title} {f.detail}", spec=spec)]
+
+
 def _write_report(findings: list[Finding], ts: str) -> Path | None:
+    findings = _shown(findings)
     if not findings:
         return None
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
@@ -878,6 +891,7 @@ def run(sources: str = "all", *, dry_run: bool = False, force: bool = False) -> 
 
 
 def _print_digest(findings: list[Finding], dry_run: bool) -> None:
+    findings = _shown(findings)
     if not findings:
         console.print("[green]Nothing new.[/]")
         return

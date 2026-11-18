@@ -69,7 +69,8 @@ def _require_db() -> str | None:
 @mcp.tool()
 def genome_overview() -> dict:
     """Summarize the loaded genome: variant counts, genome build, and how much is
-    annotated (ClinVar, gnomAD, pharmacogenomics). Call this first to see what's available."""
+    annotated (ClinVar, gnomAD, pharmacogenomics). Call this first to see what's available.
+    If `held_back` is present, the person has chosen not to see those topics — respect it."""
     err = _require_db()
     if err:
         return {"error": err}
@@ -271,16 +272,23 @@ def ask_about(query: str, limit: int = 50) -> queries.AskResult:
         import contextlib
         import sys
 
-        from . import gwas
+        from . import gwas, holdback
 
+        spec = holdback.load()
+        held = [r for r in rsids if holdback.is_held(rsid=r, spec=spec)]
         # markers_genotypes shells out and logs to stdout; redirect to stderr so it can't
         # corrupt the stdio JSON-RPC stream (safe — FastMCP isn't writing during this sync call).
         with contextlib.redirect_stdout(sys.stderr):
-            rows = gwas.ask_markers(rsids)
-        markers = [queries.MarkerGenotype(**r) for r in rows]
+            rows = gwas.ask_markers([r for r in rsids if r not in held]) if len(held) < len(rsids) else []
+        kept = [r for r in rows if not holdback.is_held(rsid=r.get("rsid"), gene=r.get("gene"),
+                                                       chrom=r.get("chrom"), pos=r.get("pos"), spec=spec)]
+        held += [r["rsid"] for r in rows if r not in kept]
+        markers = [queries.MarkerGenotype(**r) for r in kept]
         note = ("Live genotype lookup at the requested SNPs (Ensembl GRCh38 coords, hom-ref-aware). "
                 "Single-variant evidence — confirm context before interpreting."
-                if markers else "Could not resolve those rsIDs (Ensembl lookup failed or unknown IDs).")
+                if markers else "No genotypes to show for those rsIDs.")
+        if held:
+            note += " " + holdback.held_message(", ".join(held))
         return queries.AskResult(query=query, mode="rsids", markers=markers, associations=[], note=note)
     page = queries.gwas_associations(trait=query, limit=limit)
     note = page.note if page.hits else ("No carried GWAS associations for that trait. Run `locus gwas` "
@@ -297,11 +305,15 @@ def literature_for(query: str, since: str = "") -> LiteratureResult:
     import contextlib
     import sys
 
-    from . import literature
+    from . import holdback, literature
 
+    spec = holdback.load()
+    if holdback.query_is_held(query, spec):
+        return LiteratureResult(query=query, total=0, hits=[], note=holdback.held_message(f"'{query}'"))
     # pubmed_search logs to stdout; keep it off the stdio JSON-RPC stream.
     with contextlib.redirect_stdout(sys.stderr):
         raw = literature.literature_for(query, since=since or None)
+    raw = [h for h in raw if not holdback.is_held(gene=h.gene, text=f"{h.title} {h.abstract}", spec=spec)]
     hits = [LiteratureHit(pmid=h.pmid, title=h.title, abstract=h.abstract, journal=h.journal,
                           year=h.year, gene=h.gene, url=h.url) for h in raw]
     note = ("Recent PubMed papers matching the query. Summarize them against the genome's other "
@@ -321,13 +333,24 @@ def variants_in_study(pmid: str) -> StudyVariantsResult:
     import contextlib
     import sys
 
-    from . import literature
+    from . import holdback, literature
 
     with contextlib.redirect_stdout(sys.stderr):
         res = literature.study_variants(pmid)
-    markers = [queries.MarkerGenotype(**m) for m in res["markers"]]
+    spec = holdback.load()
+    kept = [m for m in res["markers"] if not holdback.is_held(
+        rsid=m.get("rsid"), gene=m.get("gene"), chrom=m.get("chrom"), pos=m.get("pos"), spec=spec)]
+    n_held = len(res["markers"]) - len(kept)
+    markers = [queries.MarkerGenotype(**m) for m in kept]
+    note = res["note"]
+    if n_held:
+        # The study-level counts would leak what's hidden; restate them over what's shown.
+        carried = sum(1 for m in kept if literature._is_carried(m.get("genotype"), m.get("ref")))
+        note = (f"Showing {len(kept)} of the study's variants; you carry a non-reference allele at {carried} "
+                f"of those. {n_held} variant(s) are in topics this person holds back and are not shown.")
+        return StudyVariantsResult(pmid=pmid, total=len(kept), carried=carried, markers=markers, note=note)
     return StudyVariantsResult(pmid=pmid, total=res["total"], carried=res["carried"],
-                               markers=markers, note=res["note"])
+                               markers=markers, note=note)
 
 
 class GeneDiseaseAssertion(BaseModel):
@@ -357,8 +380,10 @@ def gene_disease_validity(gene: str) -> GeneDiseaseResult:
     A "Definitive" link means the gene-disease relationship is real; it does NOT mean the person's
     particular variant is pathogenic. An empty result means ClinGen hasn't curated this gene, not
     that the gene is benign. Reads a local file — nothing about the genome leaves the machine."""
-    from . import clingen
+    from . import clingen, holdback
 
+    if holdback.is_held(gene=gene):
+        return GeneDiseaseResult(gene=gene, total=0, assertions=[], note=holdback.held_message(f"Gene {gene}"))
     hits = clingen.for_gene(gene)
     assertions = [GeneDiseaseAssertion(disease=a.disease, mondo=a.mondo, inheritance=a.moi,
                                        classification=a.classification, date=a.date, panel=a.panel,

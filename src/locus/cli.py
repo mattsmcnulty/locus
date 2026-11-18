@@ -36,6 +36,9 @@ schedule_app = typer.Typer(help="Schedule periodic `locus refresh` (macOS launch
 app.add_typer(schedule_app, name="schedule")
 mcp_app = typer.Typer(help="Register the MCP server with Claude.", no_args_is_help=True)
 app.add_typer(mcp_app, name="mcp")
+holdback_app = typer.Typer(help="Hold back topics you'd rather not see (e.g. Alzheimer's/APOE) — "
+                           "hidden from every tool, never deleted.", no_args_is_help=True)
+app.add_typer(holdback_app, name="holdback")
 
 console = Console()
 
@@ -452,3 +455,58 @@ def serve_api(
 
 if __name__ == "__main__":
     app()
+
+
+@holdback_app.command("list")
+def holdback_list() -> None:
+    """Show what's held back, and the topics you can hold back."""
+    from . import holdback
+
+    spec = holdback.load()
+    if spec:
+        console.print("[bold]Held back[/] (hidden from Claude, the app and reports):")
+        for t in spec.topics:
+            parts = [", ".join(t.genes), ", ".join(t.rsids), ", ".join(f'"{k}"' for k in t.keywords)]
+            console.print(f"  [cyan]{t.name}[/] — {t.label}  [dim]{' · '.join(p for p in parts if p)}[/]")
+    else:
+        console.print("Nothing is held back.")
+    avail = [t for n, t in holdback.PRESETS.items() if n not in {x.name for x in spec.topics}]
+    if avail:
+        console.print("\n[bold]Topics you can hold back[/] (`locus holdback add <topic>`):")
+        for t in avail:
+            console.print(f"  [cyan]{t.name}[/] — {t.label}")
+
+
+@holdback_app.command("add")
+def holdback_add(
+    topic: str = typer.Argument(..., help="A preset (see `locus holdback list`) or a name for a custom topic"),
+    gene: list[str] = typer.Option([], "--gene", help="Custom topic: gene symbol (repeatable)"),
+    rsid: list[str] = typer.Option([], "--rsid", help="Custom topic: rsID (repeatable)"),
+    keyword: list[str] = typer.Option([], "--keyword", help="Custom topic: trait/disease keyword (repeatable)"),
+) -> None:
+    """Hold back a topic. Takes effect immediately everywhere — no restart needed."""
+    from . import holdback
+
+    try:
+        if gene or rsid or keyword:
+            t = holdback.add_custom(topic, genes=gene, rsids=rsid, keywords=keyword)
+        else:
+            t = holdback.add_preset(topic)
+        holdback.gene_spans()  # pre-compute the genotype-independent gene footprints (cached)
+    except (ValueError, RuntimeError) as e:
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(1) from e
+    console.print(f"[green]Holding back[/] {t.label}. It's hidden, not deleted — "
+                  f"`locus holdback remove {t.name}` shows it again.")
+
+
+@holdback_app.command("remove")
+def holdback_remove(topic: str = typer.Argument(..., help="Topic name from `locus holdback list`")) -> None:
+    """Stop holding back a topic (its results reappear everywhere)."""
+    from . import holdback
+
+    if holdback.remove(topic):
+        console.print(f"[green]No longer holding back[/] {topic}.")
+    else:
+        console.print(f"[yellow]'{topic}' wasn't held back.[/] See `locus holdback list`.")
+
